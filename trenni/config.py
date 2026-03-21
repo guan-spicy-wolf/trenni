@@ -26,6 +26,11 @@ class TrenniConfig:
     default_workspace: dict = field(default_factory=dict)
     default_publication: dict = field(default_factory=dict)
 
+    # Isolation backend: "subprocess" or "bubblewrap"
+    isolation_backend: str = "subprocess"
+    # Bubblewrap-specific: isolate network (blocks LLM/eventstore access)
+    isolation_unshare_net: bool = False
+
     api_host: str = "127.0.0.1"
     api_port: int = 8100
 

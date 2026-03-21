@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from .config import TrenniConfig
-from .isolation import JobProcess, launch_job
+from .isolation import JobProcess, create_backend, launch_job
 from .pasloe_client import Event, PasloeClient
 
 logger = logging.getLogger(__name__)
@@ -33,6 +32,12 @@ class Supervisor:
         )
         self.running: bool = False
 
+        # Isolation backend
+        backend_kwargs = {}
+        if config.isolation_backend == "bubblewrap":
+            backend_kwargs["unshare_net"] = config.isolation_unshare_net
+        self.backend = create_backend(config.isolation_backend, **backend_kwargs)
+
         # In-memory state
         self.event_cursor: str | None = None
         self.jobs: dict[str, JobProcess] = {}       # job_id -> process
@@ -43,7 +48,10 @@ class Supervisor:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        logger.info("Supervisor starting (max_workers=%d)", self.config.max_workers)
+        logger.info(
+            "Supervisor starting (max_workers=%d, isolation=%s)",
+            self.config.max_workers, self.config.isolation_backend,
+        )
         self.running = True
         work_dir = Path(self.config.work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +270,7 @@ class Supervisor:
         logger.info("Launching job %s (role=%s)", job_id, role)
 
         jp = await launch_job(
+            backend=self.backend,
             job_id=job_id,
             task=task,
             role=role,
