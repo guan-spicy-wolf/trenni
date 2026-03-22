@@ -22,6 +22,18 @@ class ForkJoin:
     completed: set[str] = field(default_factory=set)
 
 
+@dataclass
+class TaskItem:
+    """A queued task waiting to be launched."""
+    source_event_id: str   # originating task.submit event id
+    job_id: str            # pre-assigned at enqueue time
+    task: str
+    role: str
+    repo: str
+    branch: str
+    evo_sha: str | None
+
+
 class Supervisor:
     def __init__(self, config: TrenniConfig) -> None:
         self.config = config
@@ -42,6 +54,11 @@ class Supervisor:
         self.event_cursor: str | None = None
         self.jobs: dict[str, JobProcess] = {}       # job_id -> process
         self.fork_joins: dict[str, ForkJoin] = {}   # parent_job_id -> ForkJoin
+
+        # Task queue — unbounded (add maxsize= here when backpressure is needed)
+        self._task_queue: asyncio.Queue[TaskItem] = asyncio.Queue()
+        # Event IDs of task.submit events already enqueued or skipped (dedup guard)
+        self._launched_event_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
