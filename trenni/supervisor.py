@@ -328,6 +328,102 @@ class Supervisor:
             cursor = next_cursor
         return results
 
+    async def _replay_unfinished_tasks(self) -> None:
+        """On startup: replay Pasloe history to recover unfinished tasks into the queue."""
+        logger.info("Replaying unfinished tasks from Pasloe...")
+
+        # 1–4: load all relevant event sets
+        launched_events = await self._fetch_all(
+            "supervisor.job.launched", source=self.config.source_id
+        )
+        started_events = await self._fetch_all("job.started")
+        completed_events = await self._fetch_all("job.completed")
+        failed_events = await self._fetch_all("job.failed")
+        submit_events = await self._fetch_all("task.submit")
+
+        # Build lookup sets
+        # source_event_id → job_id (only events with source_event_id set)
+        launched_map: dict[str, str] = {
+            e.data["source_event_id"]: e.data["job_id"]
+            for e in launched_events
+            if e.data.get("source_event_id")
+        }
+        started_job_ids: set[str] = {e.data["job_id"] for e in started_events if e.data.get("job_id")}
+        finished_job_ids: set[str] = {
+            e.data["job_id"] for e in (completed_events + failed_events) if e.data.get("job_id")
+        }
+
+        # 5: find globally latest event for cursor initialization
+        all_events = launched_events + started_events + completed_events + failed_events + submit_events
+        latest = max(all_events, key=lambda e: (e.ts, e.id), default=None)
+        if latest:
+            self.event_cursor = f"{latest.ts.isoformat()}|{latest.id}"
+            logger.info("Replay cursor initialized to %s", self.event_cursor)
+
+        # 6: classify each task.submit
+        enqueued = skipped = orphans = 0
+        for event in submit_events:
+            data = event.data
+            task = data.get("task", "")
+            if not task:
+                continue
+
+            job_id_from_launch = launched_map.get(event.id)
+
+            if job_id_from_launch:
+                job_started = job_id_from_launch in started_job_ids
+                job_finished = job_id_from_launch in finished_job_ids
+
+                if job_started and job_finished:
+                    # Complete — skip
+                    self._launched_event_ids.add(event.id)
+                    skipped += 1
+                    continue
+
+                if not job_started and not job_finished:
+                    if job_id_from_launch in self.jobs:
+                        # Process alive — skip
+                        self._launched_event_ids.add(event.id)
+                        skipped += 1
+                        continue
+                    # Launched but never started and not running — re-enqueue
+
+                if job_started and not job_finished:
+                    if job_id_from_launch in self.jobs:
+                        # Still running — skip
+                        self._launched_event_ids.add(event.id)
+                        skipped += 1
+                        continue
+                    # Orphan — started but no terminal event and process gone
+                    logger.warning(
+                        "Orphaned job %s (task.submit=%s): started but no terminal event. "
+                        "TODO: emit compensating event.",
+                        job_id_from_launch, event.id,
+                    )
+                    orphans += 1
+                    pass  # TODO: emit compensating event
+                    continue
+
+            # Not launched, or launched-not-started with dead process → re-enqueue
+            new_job_id = self._generate_job_id()
+            self._launched_event_ids.add(event.id)
+            item = TaskItem(
+                source_event_id=event.id,
+                job_id=new_job_id,
+                task=task,
+                role=data.get("role", "default"),
+                repo=data.get("repo", ""),
+                branch=data.get("branch", "main"),
+                evo_sha=data.get("evo_sha"),
+            )
+            await self._task_queue.put(item)
+            enqueued += 1
+
+        logger.info(
+            "Replay complete: %d enqueued, %d skipped, %d orphans",
+            enqueued, skipped, orphans,
+        )
+
     # ------------------------------------------------------------------
     # job.started -> evo hard gate (just log for now)
     # ------------------------------------------------------------------

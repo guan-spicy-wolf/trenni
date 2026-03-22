@@ -225,3 +225,89 @@ async def test_fetch_all_paginates_until_done():
     events = await sup._fetch_all("job.started")
     assert [e.id for e in events] == ["e1", "e2", "e3"]
     assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_enqueues_not_launched():
+    """task.submit with no supervisor.job.launched → re-enqueue."""
+    from trenni.supervisor import Supervisor
+    from trenni.config import TrenniConfig
+    from trenni.pasloe_client import Event
+    from datetime import datetime
+
+    sup = Supervisor(TrenniConfig())
+
+    def make_event(id_, type_, data=None):
+        return Event(id=id_, source_id="s", type=type_,
+                     ts=datetime.utcnow(), data=data or {})
+
+    async def fake_fetch_all(type_, source=None):
+        if type_ == "task.submit":
+            return [make_event("sub-1", "task.submit",
+                               {"task": "do X", "role": "default", "repo": "/r", "branch": "main"})]
+        return []
+
+    sup._fetch_all = fake_fetch_all
+    await sup._replay_unfinished_tasks()
+    assert sup._task_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_skips_completed():
+    """task.submit with launched + started + completed → skip."""
+    from trenni.supervisor import Supervisor
+    from trenni.config import TrenniConfig
+    from trenni.pasloe_client import Event
+    from datetime import datetime
+
+    sup = Supervisor(TrenniConfig())
+
+    def make_event(id_, type_, data=None):
+        return Event(id=id_, source_id="s", type=type_,
+                     ts=datetime.utcnow(), data=data or {})
+
+    async def fake_fetch_all(type_, source=None):
+        if type_ == "task.submit":
+            return [make_event("sub-1", "task.submit",
+                               {"task": "do X", "role": "default", "repo": "/r", "branch": "main"})]
+        if type_ == "supervisor.job.launched":
+            return [make_event("launched-1", "supervisor.job.launched",
+                               {"source_event_id": "sub-1", "job_id": "job-A"})]
+        if type_ == "job.started":
+            return [make_event("started-1", "job.started", {"job_id": "job-A"})]
+        if type_ == "job.completed":
+            return [make_event("done-1", "job.completed", {"job_id": "job-A"})]
+        return []
+
+    sup._fetch_all = fake_fetch_all
+    await sup._replay_unfinished_tasks()
+    assert sup._task_queue.qsize() == 0
+    assert "sub-1" in sup._launched_event_ids
+
+
+@pytest.mark.asyncio
+async def test_replay_reenqueues_launched_not_started():
+    """launched + no job.started + no job end + not in self.jobs → re-enqueue."""
+    from trenni.supervisor import Supervisor
+    from trenni.config import TrenniConfig
+    from trenni.pasloe_client import Event
+    from datetime import datetime
+
+    sup = Supervisor(TrenniConfig())
+
+    def make_event(id_, type_, data=None):
+        return Event(id=id_, source_id="s", type=type_,
+                     ts=datetime.utcnow(), data=data or {})
+
+    async def fake_fetch_all(type_, source=None):
+        if type_ == "task.submit":
+            return [make_event("sub-1", "task.submit",
+                               {"task": "do X", "role": "default", "repo": "/r", "branch": "main"})]
+        if type_ == "supervisor.job.launched":
+            return [make_event("launched-1", "supervisor.job.launched",
+                               {"source_event_id": "sub-1", "job_id": "job-A"})]
+        return []  # no job.started, no job.completed, no job.failed
+
+    sup._fetch_all = fake_fetch_all
+    await sup._replay_unfinished_tasks()
+    assert sup._task_queue.qsize() == 1
