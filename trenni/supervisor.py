@@ -324,10 +324,8 @@ class Supervisor:
                 # we'll eventually notice and clean up.
 
     def _generate_job_id(self) -> str:
-        import uuid
-        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        short = uuid.uuid4().hex[:6]
-        return f"trenni-{ts}-{short}"
+        import uuid_utils
+        return str(uuid_utils.uuid7())
 
     @property
     def status(self) -> dict:
