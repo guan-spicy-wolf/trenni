@@ -51,6 +51,10 @@ class Supervisor:
         )
         self.running: bool = False
 
+        # Pause/resume control
+        self._resume_event: asyncio.Event = asyncio.Event()
+        self._resume_event.set()  # initially running (not paused)
+
         # Isolation backend
         backend_kwargs = {}
         if config.isolation_backend == "bubblewrap":
@@ -73,6 +77,10 @@ class Supervisor:
         # Checkpoint config
         self._checkpoint_cycles = _DEFAULT_CHECKPOINT_CYCLES
         self._reap_timeout = _DEFAULT_REAP_TIMEOUT_S
+
+    @property
+    def paused(self) -> bool:
+        return not self._resume_event.is_set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -117,6 +125,22 @@ class Supervisor:
                 except ProcessLookupError:
                     pass
 
+    async def pause(self) -> None:
+        logger.info("Supervisor pausing")
+        self._resume_event.clear()
+        try:
+            await self.client.emit("supervisor.paused", {})
+        except Exception:
+            logger.warning("Could not emit supervisor.paused event")
+
+    async def resume(self) -> None:
+        logger.info("Supervisor resuming")
+        self._resume_event.set()
+        try:
+            await self.client.emit("supervisor.resumed", {})
+        except Exception:
+            logger.warning("Could not emit supervisor.resumed event")
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -141,6 +165,8 @@ class Supervisor:
     async def _drain_queue(self) -> None:
         """Background coroutine: dequeue SpawnedJobs and launch when capacity allows."""
         while True:
+            # Block here while paused; resumes instantly when resume_event is set
+            await self._resume_event.wait()
             job = await self._ready_queue.get()
             while not self._has_capacity():
                 await asyncio.sleep(1.0)
@@ -577,6 +603,7 @@ class Supervisor:
     def status(self) -> dict:
         return {
             "running": self.running,
+            "paused": self.paused,
             "running_jobs": len(self.jobs),
             "max_workers": self.config.max_workers,
             "pending_jobs": len(self._pending),
