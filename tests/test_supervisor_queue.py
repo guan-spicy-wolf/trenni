@@ -193,3 +193,35 @@ async def test_launch_emits_source_event_id():
     assert type_ == "supervisor.job.launched"
     assert data["source_event_id"] == "evt-src-123"
     assert data["job_id"] == "job-xyz"
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_paginates_until_done():
+    from unittest.mock import AsyncMock
+    from trenni.supervisor import Supervisor
+    from trenni.config import TrenniConfig
+    from trenni.pasloe_client import Event
+    from datetime import datetime
+
+    sup = Supervisor(TrenniConfig())
+
+    def make_event(id_):
+        return Event(id=id_, source_id="s", type="job.started",
+                     ts=datetime.utcnow(), data={"job_id": id_})
+
+    page1 = ([make_event("e1"), make_event("e2")], "cursor-page2")
+    page2 = ([make_event("e3")], None)
+
+    poll_results = [page1, page2]
+    call_count = 0
+
+    async def fake_poll(cursor=None, source=None, type_=None, limit=100):
+        nonlocal call_count
+        result = poll_results[call_count]
+        call_count += 1
+        return result
+
+    sup.client.poll = fake_poll
+    events = await sup._fetch_all("job.started")
+    assert [e.id for e in events] == ["e1", "e2", "e3"]
+    assert call_count == 2

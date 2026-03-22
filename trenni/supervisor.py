@@ -307,6 +307,27 @@ class Supervisor:
         else:
             logger.info("At capacity, cannot launch continuation %s", continuation_id)
 
+    async def _fetch_all(
+        self,
+        type_: str,
+        source: str | None = None,
+    ) -> list[Event]:
+        """Fetch all Pasloe events of a given type, paginating until exhausted."""
+        results = []
+        cursor = None
+        while True:
+            events, next_cursor = await self.client.poll(
+                cursor=cursor,
+                source=source,
+                type_=type_,
+                limit=100,
+            )
+            results.extend(events)
+            if not next_cursor:
+                break
+            cursor = next_cursor
+        return results
+
     # ------------------------------------------------------------------
     # job.started -> evo hard gate (just log for now)
     # ------------------------------------------------------------------
