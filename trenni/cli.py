@@ -41,7 +41,7 @@ def start(config_path: str | None, verbose: bool):
 
     def _shutdown(signum, frame):
         click.echo(f"Received signal {signum}, shutting down...")
-        loop.create_task(supervisor.stop())
+        loop.call_soon_threadsafe(lambda: loop.create_task(supervisor.stop()))
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
@@ -90,7 +90,8 @@ def status(config_path: str | None):
         data = resp.json()
         click.echo(f"Running:      {data['running']}")
         click.echo(f"Active jobs:  {data['running_jobs']}/{data['max_workers']}")
-        click.echo(f"Fork-joins:   {data['fork_joins_active']}")
+        click.echo(f"Pending jobs: {data['pending_jobs']}")
+        click.echo(f"Ready queue:  {data['ready_queue_size']}")
     except httpx.ConnectError:
         click.echo("Supervisor is not running (connection refused)")
         raise SystemExit(1)

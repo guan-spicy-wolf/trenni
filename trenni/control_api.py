@@ -55,16 +55,21 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
         return {"ok": True}
 
     @app.post("/hooks/events")
-    async def receive_event(request: Request, payload: EventPayload):
+    async def receive_event(request: Request):
+        body = await request.body()
         secret = getattr(supervisor.config, "webhook_secret", "")
         if secret:
-            body = await request.body()
             sig_header = request.headers.get("X-Pasloe-Signature", "")
             expected = "sha256=" + hmac.new(
                 secret.encode(), body, hashlib.sha256
             ).hexdigest()
             if not hmac.compare_digest(expected, sig_header):
                 raise HTTPException(status_code=401, detail="Invalid signature")
+
+        try:
+            payload = EventPayload.model_validate_json(body)
+        except Exception:
+            raise HTTPException(status_code=422, detail="Invalid payload")
 
         from .pasloe_client import Event
         event = Event(
