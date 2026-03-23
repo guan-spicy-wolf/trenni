@@ -41,17 +41,20 @@ class TestStatus:
 
 class TestPauseResume:
     async def test_pause(self, client, supervisor):
+        supervisor.client.emit = AsyncMock()
         r = await client.post("/control/pause")
         assert r.status_code == 200
         assert supervisor.paused is True
 
     async def test_resume(self, client, supervisor):
         supervisor._resume_event.clear()  # simulate paused
+        supervisor.client.emit = AsyncMock()
         r = await client.post("/control/resume")
         assert r.status_code == 200
         assert supervisor.paused is False
 
     async def test_pause_then_resume(self, client, supervisor):
+        supervisor.client.emit = AsyncMock()
         await client.post("/control/pause")
         assert supervisor.paused is True
         await client.post("/control/resume")

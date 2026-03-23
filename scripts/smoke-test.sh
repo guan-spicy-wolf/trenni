@@ -7,9 +7,9 @@
 #   ./scripts/smoke-test.sh --api-base URL --api-key KEY --api-key-env ENV_NAME
 #
 # 前置条件:
-#   - pip install -e ../pasloe ../palimpsest .       # 三个包都已安装
-#   - palimpsest-evo 仓库存在（默认 ../palimpsest-evo）
+#   - pip install -e ../pasloe .       # pasloe 和 trenni 已安装
 #   - 设置 LLM API key 环境变量（默认 ANTHROPIC_API_KEY）
+#   - 本地已构建 localhost/yoitsu-palimpsest-job:dev
 #
 set -euo pipefail
 
@@ -27,9 +27,10 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 PASLOE_PORT=18900
 PASLOE_HOST=127.0.0.1
-EVO_REPO="${PROJECT_DIR}/../palimpsest-evo"
 WORK_DIR="${PROJECT_DIR}/smoke-work"
 TASK="List the files in the evo repository and describe what each role does. Then call task_complete with status success."
+JOB_IMAGE="localhost/yoitsu-palimpsest-job:dev"
+PODMAN_SOCKET_URI="${PODMAN_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock}"
 
 # LLM 配置（可通过参数覆盖）
 API_BASE=""
@@ -51,7 +52,6 @@ while [[ $# -gt 0 ]]; do
         --api-key)     API_KEY="$2";     shift 2;;
         --api-key-env) API_KEY_ENV="$2"; shift 2;;
         --model)       MODEL="$2";       shift 2;;
-        --evo-repo)    EVO_REPO="$2";    shift 2;;
         --repo)        WORK_REPO="$2";   shift 2;;
         --branch)      WORK_BRANCH="$2"; shift 2;;
         --task)        TASK="$2";        shift 2;;
@@ -65,7 +65,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --api-key KEY        LLM API key value"
             echo "  --api-key-env NAME   Env var name for API key (default: ANTHROPIC_API_KEY)"
             echo "  --model MODEL        LLM model name (default: claude-sonnet-4-6)"
-            echo "  --evo-repo PATH      Path to palimpsest-evo repo"
             echo "  --repo URL           Git repo URL to work on (optional)"
             echo "  --branch BRANCH      Git branch (default: main)"
             echo "  --task TEXT          Task to submit"
@@ -90,12 +89,16 @@ check_cmd() {
         exit 1
     fi
 }
-check_cmd palimpsest
 check_cmd trenni
 check_cmd uvicorn
 check_cmd curl
+check_cmd podman
 
-EVO_REPO="$(cd "$EVO_REPO" 2>/dev/null && pwd)" || { fail "evo 仓库不存在: $EVO_REPO"; exit 1; }
+if ! podman image exists "$JOB_IMAGE"; then
+    fail "缺少 job image: $JOB_IMAGE"
+    echo "请先执行: podman build -t $JOB_IMAGE -f deploy/podman/palimpsest-job.Containerfile ."
+    exit 1
+fi
 
 if [[ -z "${!API_KEY_ENV:-}" ]]; then
     warn "环境变量 $API_KEY_ENV 未设置（LLM 调用会失败）"
@@ -160,12 +163,20 @@ fi
 
 cat > "$CONFIG_FILE" <<YAML
 pasloe_url: "${PASLOE_URL}"
-evo_repo_path: "${EVO_REPO}"
-work_dir: "${WORK_DIR}/jobs"
+runtime:
+  kind: "podman"
+  podman:
+    socket_uri: "${PODMAN_SOCKET_URI}"
+    pod_name: "yoitsu-dev"
+    image: "${JOB_IMAGE}"
+    pull_policy: "never"
+    git_token_env: "GIT_TOKEN"
+    env_allowlist:
+      - "${API_KEY_ENV}"
 max_workers: 2
 poll_interval: 2.0
 default_workspace:
-  git_token_env: "GIT_TOKEN"
+  depth: 1
 ${LLM_BLOCK}
 YAML
 
@@ -240,12 +251,9 @@ while [[ $ELAPSED -lt $JOB_TIMEOUT ]]; do
         break
     fi
 
-    # 检查 job 工作目录下的子进程是否还在运行
-    JOB_DIR="$WORK_DIR/jobs/$JOB_ID"
-    if [[ -d "$JOB_DIR" ]]; then
-        # 查询 eventstore 看是否有终态事件
-        EVENTS=$(curl -sf "${PASLOE_URL}/events?order=asc" 2>/dev/null || echo "[]")
-        FINAL_STATUS=$(echo "$EVENTS" | python3 -c "
+# 查询 eventstore 看是否有终态事件
+    EVENTS=$(curl -sf "${PASLOE_URL}/events?order=asc" 2>/dev/null || echo "[]")
+    FINAL_STATUS=$(echo "$EVENTS" | python3 -c "
 import sys, json
 events = json.load(sys.stdin)
 for e in events:
@@ -253,8 +261,7 @@ for e in events:
         print(e['type'])
         break
 " 2>/dev/null || true)
-        [[ -n "$FINAL_STATUS" ]] && break
-    fi
+    [[ -n "$FINAL_STATUS" ]] && break
 
     sleep 3
     ELAPSED=$((ELAPSED + 3))
@@ -281,21 +288,11 @@ for e in events:
     job = e.get('data', {}).get('job_id', '')
     extra = ''
     if typ == 'supervisor.job.launched':
-        extra = f' pid={e[\"data\"].get(\"pid\",\"?\")} role={e[\"data\"].get(\"role\",\"?\")}'
+        extra = f' container_id={e[\"data\"].get(\"container_id\",\"?\")} role={e[\"data\"].get(\"role\",\"?\")}'
     elif typ in ('job.completed', 'job.failed'):
         extra = f' summary={e[\"data\"].get(\"summary\",\"(none)\")[:80]}'
     print(f'  [{src}] {typ} {job}{extra}')
 " 2>/dev/null || warn "无法获取事件"
-
-echo ""
-
-# Job 目录内容
-JOB_DIR="$WORK_DIR/jobs/$JOB_ID"
-if [[ -d "$JOB_DIR" ]]; then
-    info "Job 工作目录: $JOB_DIR"
-    info "生成的 config.yaml:"
-    cat "$JOB_DIR/config.yaml" | sed 's/^/  /'
-fi
 
 echo ""
 
@@ -313,8 +310,7 @@ elif [[ $ELAPSED -ge $JOB_TIMEOUT ]]; then
     info "查看 pasloe 日志: $WORK_DIR/pasloe.log"
     exit 2
 else
-    # job launch 成功但进程退出了，没有终态事件
-    warn "Job 进程已退出但未产生终态事件"
+    warn "Job launch 成功但未产生终态事件"
     info "查看 trenni 日志最后 20 行:"
     tail -20 "$WORK_DIR/trenni.log" | sed 's/^/  /'
     exit 1

@@ -38,7 +38,17 @@ class PasloeClient:
     async def register_source(self) -> None:
         await self._client.post("/sources", json={"id": self.source_id})
 
-    async def emit(self, event_type: str, data: dict) -> str:
+    async def emit(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        timeout: float | None = None,
+    ) -> str:
+        request_kwargs = {}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
         resp = await self._client.post(
             "/events",
             json={
@@ -46,6 +56,7 @@ class PasloeClient:
                 "type": event_type,
                 "data": data,
             },
+            **request_kwargs,
         )
         resp.raise_for_status()
         return resp.json()["id"]

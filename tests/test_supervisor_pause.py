@@ -21,11 +21,13 @@ class TestPauseResume:
 
     async def test_pause_sets_flag(self):
         s = _sup()
+        s.client.emit = AsyncMock()
         await s.pause()
         assert s.paused is True
 
     async def test_resume_clears_flag(self):
         s = _sup()
+        s.client.emit = AsyncMock()
         await s.pause()
         await s.resume()
         assert s.paused is False
@@ -34,18 +36,23 @@ class TestPauseResume:
         s = _sup()
         s.client.emit = AsyncMock()
         await s.pause()
-        s.client.emit.assert_called_once_with("supervisor.paused", {})
+        s.client.emit.assert_called_once_with(
+            "supervisor.paused", {}, timeout=1.0
+        )
 
     async def test_resume_emits_pasloe_event(self):
         s = _sup()
         s._resume_event.clear()
         s.client.emit = AsyncMock()
         await s.resume()
-        s.client.emit.assert_called_once_with("supervisor.resumed", {})
+        s.client.emit.assert_called_once_with(
+            "supervisor.resumed", {}, timeout=1.0
+        )
 
     async def test_drain_queue_blocks_while_paused(self):
         """While paused, ready jobs stay in queue."""
         s = _sup()
+        s.client.emit = AsyncMock()
         await s.pause()
 
         from trenni.supervisor import SpawnedJob
