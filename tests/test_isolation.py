@@ -89,6 +89,9 @@ def test_runtime_spec_builder_serializes_job_config(monkeypatch):
         repo="git@example.com/repo.git",
         init_branch="main",
         evo_sha="abc123",
+        llm_overrides={"temperature": 0.4},
+        workspace_overrides={"depth": 5},
+        publication_overrides={"branch_prefix": "child/job"},
     )
 
     assert spec.container_name == "yoitsu-job-job-1"
@@ -101,7 +104,9 @@ def test_runtime_spec_builder_serializes_job_config(monkeypatch):
     payload = yaml.safe_load(base64.b64decode(spec.config_payload_b64))
     assert payload["job_id"] == "job-1"
     assert payload["workspace"]["repo"] == "git@example.com/repo.git"
-    assert payload["publication"]["branch_prefix"] == "palimpsest/job"
+    assert payload["workspace"]["depth"] == 5
+    assert payload["llm"]["temperature"] == 0.4
+    assert payload["publication"]["branch_prefix"] == "child/job"
 
 
 def test_config_from_yaml_rejects_legacy_runtime_fields(tmp_path: Path):

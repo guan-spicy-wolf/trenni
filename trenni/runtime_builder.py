@@ -67,18 +67,29 @@ class RuntimeSpecBuilder:
         repo: str,
         init_branch: str,
         evo_sha: str | None,
+        llm_overrides: dict | None = None,
+        workspace_overrides: dict | None = None,
+        publication_overrides: dict | None = None,
     ) -> JobRuntimeSpec:
+        merged_workspace = {
+            **self.config.default_workspace,
+            **(workspace_overrides or {}),
+            "repo": repo,
+            "init_branch": init_branch,
+        }
         job_config = {
             "job_id": job_id,
             "task": task,
             "role": role,
-            "workspace": {
-                "repo": repo,
-                "init_branch": init_branch,
-                **self.config.default_workspace,
+            "workspace": merged_workspace,
+            "llm": {
+                **self.config.default_llm,
+                **(llm_overrides or {}),
             },
-            "llm": dict(self.config.default_llm),
-            "publication": dict(self.config.default_publication),
+            "publication": {
+                **self.config.default_publication,
+                **(publication_overrides or {}),
+            },
             "eventstore": {
                 "url": self.config.eventstore_url,
                 "api_key_env": self.config.pasloe_api_key_env,

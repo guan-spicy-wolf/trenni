@@ -80,7 +80,7 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
             data=payload.data,
         )
         try:
-            await supervisor._handle_event(event)
+            await supervisor._handle_event(event, realtime=True)
         except Exception:
             logger.exception("Error handling webhook event %s", payload.id)
         return {"ok": True}

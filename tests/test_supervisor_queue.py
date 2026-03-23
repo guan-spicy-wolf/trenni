@@ -10,7 +10,7 @@ import pytest
 from trenni.config import TrenniConfig
 from trenni.pasloe_client import Event
 from trenni.runtime_types import ContainerState, JobHandle, JobRuntimeSpec
-from trenni.supervisor import SpawnedJob, Supervisor
+from trenni.supervisor import SpawnDefaults, SpawnedJob, Supervisor
 
 
 def _evt(id_: str, type_: str, data: dict | None = None) -> Event:
@@ -45,6 +45,7 @@ def test_generate_job_id_is_uuid_v7():
 def test_supervisor_has_ready_queue_and_dedup():
     sup = _make_supervisor()
     assert isinstance(sup._ready_queue, asyncio.Queue)
+    assert isinstance(sup._processed_event_ids, set)
     assert isinstance(sup._launched_event_ids, set)
     assert isinstance(sup._pending, dict)
     assert isinstance(sup._completed_jobs, set)
@@ -90,11 +91,17 @@ async def test_handle_task_submit_ignores_empty_task():
 @pytest.mark.asyncio
 async def test_handle_spawn_creates_children_no_continuation():
     sup = _make_supervisor()
+    sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
+        repo="/parent-repo",
+        init_branch="main",
+        role="default",
+        evo_sha="parent-sha",
+    )
     event = _evt("spawn-1", "job.spawn.request", {
         "job_id": "parent-1",
         "tasks": [
-            {"task": "child A", "role_file": "roles/worker.py", "repo": "/r", "branch": "main"},
-            {"task": "child B", "role_file": "roles/worker.py", "repo": "/r", "branch": "main"},
+            {"prompt": "child A", "job_spec": {"role": "worker", "repo": "/r", "init_branch": "main"}},
+            {"prompt": "child B", "job_spec": {"role": "worker", "repo": "/r", "init_branch": "main"}},
         ],
         "wait_for": "all_complete",
     })
@@ -106,6 +113,7 @@ async def test_handle_spawn_creates_children_no_continuation():
     c1 = sup._ready_queue.get_nowait()
     assert c0.job_id == "parent-1-c0"
     assert c1.job_id == "parent-1-c1"
+    assert c0.task == "child A"
     assert c0.role == "worker"
     assert c0.depends_on == frozenset()
     assert len(sup._pending) == 0
@@ -121,6 +129,74 @@ async def test_handle_spawn_empty_tasks_ignored():
     await sup._handle_spawn(event)
     assert sup._ready_queue.qsize() == 0
     assert len(sup._pending) == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_event_deduplicates_spawn_request():
+    sup = _make_supervisor()
+    sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
+        repo="/parent-repo",
+        init_branch="main",
+        role="default",
+        evo_sha="parent-sha",
+    )
+    event = _evt("spawn-dup", "job.spawn.request", {
+        "job_id": "parent-1",
+        "tasks": [
+            {"prompt": "child A", "job_spec": {"role": "worker", "repo": "/r", "init_branch": "main"}},
+            {"prompt": "child B", "job_spec": {"role": "worker", "repo": "/r", "init_branch": "main"}},
+        ],
+    })
+
+    await sup._handle_event(event, realtime=True)
+    await sup._handle_event(event)
+
+    assert sup._ready_queue.qsize() == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_spawn_inherits_parent_defaults_for_missing_job_spec_fields():
+    sup = _make_supervisor()
+    sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
+        repo="/parent-repo",
+        init_branch="parent-branch",
+        role="parent-role",
+        evo_sha="parent-sha",
+        llm_overrides={"model": "kimi-parent"},
+        workspace_overrides={"depth": 2},
+        publication_overrides={"branch_prefix": "parent/job"},
+    )
+    event = _evt("spawn-inherit", "job.spawn.request", {
+        "job_id": "parent-1",
+        "tasks": [
+            {"prompt": "child task", "job_spec": {"role": "worker", "workspace": {"depth": 3}}},
+        ],
+    })
+
+    await sup._handle_event(event, realtime=True)
+
+    child = sup._ready_queue.get_nowait()
+    assert child.task == "child task"
+    assert child.role == "worker"
+    assert child.repo == "/parent-repo"
+    assert child.init_branch == "parent-branch"
+    assert child.evo_sha == "parent-sha"
+    assert child.workspace_overrides["depth"] == 3
+    assert child.llm_overrides["model"] == "kimi-parent"
+    assert child.publication_overrides["branch_prefix"] == "parent/job"
+
+
+@pytest.mark.asyncio
+async def test_handle_event_realtime_advances_cursor_and_delays_poll():
+    sup = _make_supervisor()
+    sup._webhook_active = True
+    sup.event_cursor = "2026-01-01T00:00:00|old"
+    event = _evt("evt-new", "job.started", {"job_id": "job-1"})
+
+    await sup._handle_event(event, realtime=True)
+
+    assert sup.event_cursor.endswith("|evt-new")
+    assert sup._webhook_poll_not_before > time.monotonic()
 
 
 @pytest.mark.asyncio

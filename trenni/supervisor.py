@@ -5,6 +5,8 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
 from .config import TrenniConfig
 from .pasloe_client import Event, PasloeClient
@@ -25,7 +27,21 @@ class SpawnedJob:
     repo: str
     init_branch: str
     evo_sha: str | None
+    llm_overrides: dict[str, Any] = field(default_factory=dict)
+    workspace_overrides: dict[str, Any] = field(default_factory=dict)
+    publication_overrides: dict[str, Any] = field(default_factory=dict)
     depends_on: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass
+class SpawnDefaults:
+    repo: str
+    init_branch: str
+    role: str
+    evo_sha: str | None
+    llm_overrides: dict[str, Any] = field(default_factory=dict)
+    workspace_overrides: dict[str, Any] = field(default_factory=dict)
+    publication_overrides: dict[str, Any] = field(default_factory=dict)
 
 
 _DEFAULT_CHECKPOINT_CYCLES = 30
@@ -58,13 +74,16 @@ class Supervisor:
         self._completed_jobs: set[str] = set()
         self._failed_jobs: set[str] = set()
         self._job_summaries: dict[str, str] = {}
+        self._processed_event_ids: set[str] = set()
         self._launched_event_ids: set[str] = set()
+        self._spawn_defaults_by_job: dict[str, SpawnDefaults] = {}
 
         self._checkpoint_cycles = _DEFAULT_CHECKPOINT_CYCLES
         self._reap_timeout = self.runtime_defaults.cleanup_timeout_seconds
 
         self._webhook_id: str | None = None
         self._webhook_active: bool = False
+        self._webhook_poll_not_before: float = 0.0
 
     @property
     def paused(self) -> bool:
@@ -143,6 +162,7 @@ class Supervisor:
                              "job.completed", "job.failed", "job.started"],
             )
             self._webhook_active = True
+            self._reset_webhook_poll_deadline()
             logger.info(
                 "Registered webhook (id=%s) → %s (poll fallback every %.0fs)",
                 self._webhook_id, url, self.config.webhook_poll_interval,
@@ -156,10 +176,11 @@ class Supervisor:
     async def _run_loop(self) -> None:
         polls_since_checkpoint = 0
         while self.running:
-            try:
-                await self._poll_and_handle()
-            except Exception:
-                logger.exception("Error in poll cycle")
+            if self._poll_due_now():
+                try:
+                    await self._poll_and_handle()
+                except Exception:
+                    logger.exception("Error in poll cycle")
 
             try:
                 await self._mark_exited_jobs()
@@ -171,12 +192,7 @@ class Supervisor:
                 await self._checkpoint()
                 polls_since_checkpoint = 0
 
-            interval = (
-                self.config.webhook_poll_interval
-                if self._webhook_active
-                else self.config.poll_interval
-            )
-            await asyncio.sleep(interval)
+            await asyncio.sleep(self.config.poll_interval)
 
     async def _drain_queue(self) -> None:
         while True:
@@ -200,6 +216,9 @@ class Supervisor:
             repo=job.repo,
             init_branch=job.init_branch,
             evo_sha=job.evo_sha,
+            llm_overrides=job.llm_overrides,
+            workspace_overrides=job.workspace_overrides,
+            publication_overrides=job.publication_overrides,
             source_event_id=job.source_event_id,
         )
 
@@ -220,7 +239,17 @@ class Supervisor:
             except Exception:
                 logger.exception("Error handling event %s (type=%s)", event.id, event.type)
 
-    async def _handle_event(self, event: Event) -> None:
+    async def _handle_event(self, event: Event, *, realtime: bool = False) -> None:
+        if realtime:
+            self._advance_cursor_from_event(event)
+            self._reset_webhook_poll_deadline()
+
+        if event.id in self._processed_event_ids:
+            logger.debug("Skipping already-processed event %s (type=%s)", event.id, event.type)
+            return
+
+        self._processed_event_ids.add(event.id)
+
         match event.type:
             case "task.submit":
                 await self._handle_task_submit(event)
@@ -252,6 +281,9 @@ class Supervisor:
             repo=data.get("repo", ""),
             init_branch=data.get("init_branch", data.get("branch", "main")),
             evo_sha=data.get("evo_sha"),
+            llm_overrides=dict(data.get("llm") or {}),
+            workspace_overrides=dict(data.get("workspace") or {}),
+            publication_overrides=dict(data.get("publication") or {}),
         )
         await self._enqueue(job)
         logger.info(
@@ -263,30 +295,63 @@ class Supervisor:
         data = event.data
         parent_job_id = data.get("job_id", "")
         tasks = data.get("tasks", [])
+        parent_defaults = self._spawn_defaults_by_job.get(parent_job_id)
 
         if not tasks:
             logger.warning("Empty spawn request from job %s", parent_job_id)
             return
 
-        evo_sha: str | None = None
         child_ids: list[str] = []
 
         for i, child_def in enumerate(tasks):
             child_id = f"{parent_job_id}-c{i}"
+            prompt = (child_def.get("prompt") or child_def.get("task") or "").strip()
+            if not prompt:
+                logger.warning("Ignoring spawned child %s with empty prompt", child_id)
+                continue
+
             child_ids.append(child_id)
 
-            evo_sha = child_def.get("role_sha", evo_sha)
-            role_file = child_def.get("role_file", "")
-            role = role_file.replace("roles/", "").replace(".py", "") if role_file else "default"
+            job_spec = dict(child_def.get("job_spec") or {})
+
+            role = job_spec.get("role")
+            if not role and child_def.get("role_file"):
+                role = str(child_def["role_file"]).replace("roles/", "").replace(".py", "")
+            if not role and parent_defaults:
+                role = parent_defaults.role
+
+            repo = job_spec.get("repo") or child_def.get("repo", "")
+            if not repo and parent_defaults:
+                repo = parent_defaults.repo
+
+            init_branch = job_spec.get("init_branch") or child_def.get("init_branch") or child_def.get("branch")
+            if not init_branch and parent_defaults:
+                init_branch = parent_defaults.init_branch
+
+            evo_sha = job_spec.get("evo_sha") or child_def.get("evo_sha") or child_def.get("role_sha")
+            if not evo_sha and parent_defaults:
+                evo_sha = parent_defaults.evo_sha
+
+            llm_overrides = dict(parent_defaults.llm_overrides if parent_defaults else {})
+            llm_overrides.update(dict(job_spec.get("llm") or child_def.get("llm") or {}))
+
+            workspace_overrides = dict(parent_defaults.workspace_overrides if parent_defaults else {})
+            workspace_overrides.update(dict(job_spec.get("workspace") or child_def.get("workspace") or {}))
+
+            publication_overrides = dict(parent_defaults.publication_overrides if parent_defaults else {})
+            publication_overrides.update(dict(job_spec.get("publication") or child_def.get("publication") or {}))
 
             child = SpawnedJob(
                 job_id=child_id,
                 source_event_id=event.id,
-                task=child_def.get("task", ""),
-                role=role,
-                repo=child_def.get("repo", ""),
-                init_branch=child_def.get("branch", "main"),
+                task=prompt,
+                role=role or "default",
+                repo=repo,
+                init_branch=init_branch or "main",
                 evo_sha=evo_sha,
+                llm_overrides=llm_overrides,
+                workspace_overrides=workspace_overrides,
+                publication_overrides=publication_overrides,
             )
             await self._enqueue(child)
 
@@ -453,6 +518,19 @@ class Supervisor:
             for e in launched_events
             if e.data.get("source_event_id")
         }
+        for e in launched_events:
+            job_id = e.data.get("job_id", "")
+            if not job_id:
+                continue
+            self._spawn_defaults_by_job[job_id] = SpawnDefaults(
+                repo=e.data.get("repo", ""),
+                init_branch=e.data.get("init_branch", "main"),
+                role=e.data.get("role", "default"),
+                evo_sha=e.data.get("evo_sha") or None,
+                llm_overrides=dict(e.data.get("llm") or {}),
+                workspace_overrides=dict(e.data.get("workspace") or {}),
+                publication_overrides=dict(e.data.get("publication") or {}),
+            )
         started_job_ids = {
             e.data["job_id"] for e in started_events if e.data.get("job_id")
         }
@@ -559,6 +637,9 @@ class Supervisor:
         repo: str,
         init_branch: str,
         evo_sha: str | None,
+        llm_overrides: dict[str, Any] | None = None,
+        workspace_overrides: dict[str, Any] | None = None,
+        publication_overrides: dict[str, Any] | None = None,
         source_event_id: str = "",
     ) -> None:
         logger.info("Launching job %s (role=%s, source=%s)", job_id, role, source_event_id or "?")
@@ -571,6 +652,9 @@ class Supervisor:
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
+            llm_overrides=llm_overrides,
+            workspace_overrides=workspace_overrides,
+            publication_overrides=publication_overrides,
         )
         handle = await self.backend.create(spec)
         try:
@@ -580,13 +664,27 @@ class Supervisor:
             raise
 
         self.jobs[job_id] = handle
+        self._spawn_defaults_by_job[job_id] = SpawnDefaults(
+            repo=repo,
+            init_branch=init_branch,
+            role=role,
+            evo_sha=evo_sha,
+            llm_overrides=dict(llm_overrides or {}),
+            workspace_overrides=dict(workspace_overrides or {}),
+            publication_overrides=dict(publication_overrides or {}),
+        )
 
         await self.client.emit("supervisor.job.launched", {
             "job_id": job_id,
             "source_event_id": source_event_id,
             "task": task,
             "role": role,
+            "repo": repo,
+            "init_branch": init_branch,
             "evo_sha": evo_sha or "",
+            "llm": dict(llm_overrides or {}),
+            "workspace": dict(workspace_overrides or {}),
+            "publication": dict(publication_overrides or {}),
             "runtime_kind": self.runtime_defaults.kind,
             "container_id": handle.container_id,
             "container_name": handle.container_name,
@@ -614,6 +712,35 @@ class Supervisor:
         except Exception:
             logger.warning("Could not emit %s event", event_type)
 
+    def _poll_due_now(self) -> bool:
+        if not self._webhook_active:
+            return True
+        return time.monotonic() >= self._webhook_poll_not_before
+
+    def _reset_webhook_poll_deadline(self) -> None:
+        if not self._webhook_active:
+            return
+        self._webhook_poll_not_before = time.monotonic() + self.config.webhook_poll_interval
+
+    def _advance_cursor_from_event(self, event: Event) -> None:
+        current = self._cursor_key(self.event_cursor)
+        candidate = (event.ts, event.id)
+        if current is None or candidate > current:
+            self.event_cursor = f"{event.ts.isoformat()}|{event.id}"
+
+    @staticmethod
+    def _cursor_key(cursor: str | None) -> tuple[datetime, str] | None:
+        if not cursor:
+            return None
+        try:
+            ts_raw, event_id = cursor.split("|", 1)
+        except ValueError:
+            return None
+        try:
+            return datetime.fromisoformat(ts_raw), event_id
+        except ValueError:
+            return None
+
     async def _inspect_replay_state(self, container_id: str, container_name: str) -> ContainerState:
         ref = container_id or container_name
         if not ref:
@@ -640,6 +767,9 @@ class Supervisor:
             repo=data.get("repo", ""),
             init_branch=data.get("init_branch", data.get("branch", "main")),
             evo_sha=data.get("evo_sha"),
+            llm_overrides=dict(data.get("llm") or {}),
+            workspace_overrides=dict(data.get("workspace") or {}),
+            publication_overrides=dict(data.get("publication") or {}),
         )
 
     def _has_capacity(self) -> bool:
