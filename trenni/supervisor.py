@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from yoitsu_contracts.conditions import condition_from_data, condition_to_data
@@ -575,7 +575,7 @@ class Supervisor:
 
     def _advance_cursor_from_event(self, event: Event) -> None:
         current = self._cursor_key(self.event_cursor)
-        candidate = (event.ts, event.id)
+        candidate = (self._normalize_cursor_ts(event.ts), event.id)
         if current is None or candidate > current:
             self.event_cursor = f"{event.ts.isoformat()}|{event.id}"
 
@@ -585,9 +585,15 @@ class Supervisor:
             return None
         try:
             ts_raw, event_id = cursor.split("|", 1)
-            return datetime.fromisoformat(ts_raw), event_id
+            return Supervisor._normalize_cursor_ts(datetime.fromisoformat(ts_raw)), event_id
         except ValueError:
             return None
+
+    @staticmethod
+    def _normalize_cursor_ts(ts: datetime) -> datetime:
+        if ts.tzinfo is None:
+            return ts
+        return ts.astimezone(timezone.utc).replace(tzinfo=None)
 
     async def _inspect_replay_state(self, container_id: str, container_name: str) -> ContainerState:
         ref = container_id or container_name
