@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from yoitsu_contracts.conditions import condition_from_data, condition_to_data
@@ -468,7 +469,7 @@ class Supervisor:
 
         for handle, logs in reaped:
             self.jobs.pop(handle.job_id, None)
-            task_id = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None)).task_id
+            task_id = self.state.jobs_by_id[handle.job_id].task_id if handle.job_id in self.state.jobs_by_id else handle.job_id
             await self.scheduler.record_job_terminal(
                 job_id=handle.job_id,
                 summary=f"Container exited without terminal event (exit_code={handle.exit_code})",
@@ -481,7 +482,6 @@ class Supervisor:
                 "code": "runtime_lost",
                 "logs_tail": logs[-4000:],
             }
-            from types import SimpleNamespace
             event = SimpleNamespace(id="", source_id="", type="job.failed", data=event_data)
             await self.client.emit("job.failed", event_data)
             await self._cleanup_handle(handle, failed=True)
@@ -624,7 +624,6 @@ class Supervisor:
             )
             await self.scheduler.record_job_terminal(job_id=job.job_id, summary=reason, cancelled=True)
             
-            from types import SimpleNamespace
             await self._evaluate_task_termination(
                 job_id=job.job_id, 
                 task_id=task_id, 
