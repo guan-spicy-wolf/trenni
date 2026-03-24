@@ -462,6 +462,13 @@ async def test_checkpoint_reaps_timed_out_containers():
     sup.backend.stop = AsyncMock()
     sup.backend.remove = AsyncMock()
 
+    from trenni.state import SpawnedJob, TaskRecord
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...")
+    sup.state.jobs_by_id["j1"] = SpawnedJob(
+        job_id="j1", source_event_id="e1", task="t", role="default",
+        repo="r", init_branch="b", evo_sha="s", llm_overrides={},
+        workspace_overrides={}, publication_overrides={}, task_id="t1"
+    )
     handle = JobHandle(
         "j1",
         "ctr-1",
@@ -476,6 +483,7 @@ async def test_checkpoint_reaps_timed_out_containers():
     assert "j1" not in sup.jobs
     types = [e[0] for e in emitted]
     assert "job.failed" in types
+    assert "task.failed" in types
     assert "supervisor.checkpoint" in types
     fail_data = next(d for t, d in emitted if t == "job.failed")
     assert fail_data["code"] == "runtime_lost"

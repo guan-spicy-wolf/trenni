@@ -270,14 +270,6 @@ class Supervisor:
                 self._register_replayed_launch(event)
             case "task.created" | "task.completed" | "task.failed" | "task.cancelled":
                 pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
-            case "job.spawn.request":
-                await self._handle_spawn(event, replay=replay)
-            case "job.completed" | "job.failed" | "job.cancelled":
-                await self._handle_job_done(event, replay=replay)
-            case "job.started":
-                await self._handle_job_started(event, replay=replay)
-            case "supervisor.job.launched":
-                self._register_replayed_launch(event)
 
     async def _handle_trigger(self, event: Event, *, replay: bool = False) -> None:
         if event.id in self._launched_event_ids and not replay:
@@ -476,22 +468,24 @@ class Supervisor:
 
         for handle, logs in reaped:
             self.jobs.pop(handle.job_id, None)
+            task_id = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None)).task_id
             await self.scheduler.record_job_terminal(
                 job_id=handle.job_id,
                 summary=f"Container exited without terminal event (exit_code={handle.exit_code})",
                 failed=True,
             )
-            await self.client.emit(
-                "job.failed",
-                {
-                    "job_id": handle.job_id,
-                    "task_id": self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None)).task_id,
-                    "error": f"Container exited without emitting terminal event (exit_code={handle.exit_code})",
-                    "code": "runtime_lost",
-                    "logs_tail": logs[-4000:],
-                },
-            )
+            event_data = {
+                "job_id": handle.job_id,
+                "task_id": task_id,
+                "error": f"Container exited without emitting terminal event (exit_code={handle.exit_code})",
+                "code": "runtime_lost",
+                "logs_tail": logs[-4000:],
+            }
+            from types import SimpleNamespace
+            event = SimpleNamespace(id="", source_id="", type="job.failed", data=event_data)
+            await self.client.emit("job.failed", event_data)
             await self._cleanup_handle(handle, failed=True)
+            await self._evaluate_task_termination(job_id=handle.job_id, task_id=task_id, event=event)
 
         snapshot = SupervisorCheckpointData.model_validate(self.state.snapshot())
         await self.client.emit("supervisor.checkpoint", snapshot.model_dump(mode="json"))
@@ -630,11 +624,11 @@ class Supervisor:
             )
             await self.scheduler.record_job_terminal(job_id=job.job_id, summary=reason, cancelled=True)
             
-            # Since these jobs are now definitively terminated, evaluate if their tasks are also terminal
+            from types import SimpleNamespace
             await self._evaluate_task_termination(
                 job_id=job.job_id, 
                 task_id=task_id, 
-                event=Event(id="", type="job.cancelled", source_id="", ts=datetime.now(timezone.utc), data={"reason": reason})
+                event=SimpleNamespace(id="", type="job.cancelled", source_id="", data={"reason": reason})
             )
 
     def _poll_due_now(self) -> bool:
