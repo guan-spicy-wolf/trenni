@@ -6,6 +6,7 @@ from typing import Any
 
 from yoitsu_contracts.conditions import Condition
 from yoitsu_contracts.config import JobContextConfig
+from yoitsu_contracts.events import EvalSpec, TaskResult
 
 from .runtime_types import JobHandle
 
@@ -49,10 +50,16 @@ class SpawnDefaults:
 class TaskRecord:
     task_id: str
     goal: str
+    state: str = "pending"
     terminal: bool = False
     terminal_state: str = ""
     source_event_id: str = ""
     spec: dict = field(default_factory=dict)
+    eval_spec: EvalSpec | None = None
+    eval_spawned: bool = False
+    eval_job_id: str = ""
+    result: TaskResult | None = None
+    job_order: list[str] = field(default_factory=list)
 
 @dataclass
 class SupervisorState:
@@ -66,13 +73,14 @@ class SupervisorState:
     failed_jobs: set[str] = field(default_factory=set)
     cancelled_jobs: set[str] = field(default_factory=set)
     job_summaries: dict[str, str] = field(default_factory=dict)
+    job_git_refs: dict[str, str] = field(default_factory=dict)
     processed_event_ids: set[str] = field(default_factory=set)
     launched_event_ids: set[str] = field(default_factory=set)
     spawn_defaults_by_job: dict[str, SpawnDefaults] = field(default_factory=dict)
 
     def task_states(self) -> dict[str, str]:
         return {
-            task_id: (record.terminal_state if record.terminal else "submitted")
+            task_id: (record.terminal_state if record.terminal else (record.state or "pending"))
             for task_id, record in self.tasks.items()
         }
 

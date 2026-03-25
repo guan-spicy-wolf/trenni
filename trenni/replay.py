@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+from yoitsu_contracts.events import EvalSpec, TaskResult
+
 from .checkpoint import ACTIVE_CONTAINER_STATES
 
 logger = logging.getLogger(__name__)
@@ -25,9 +27,11 @@ async def rebuild_state(supervisor) -> None:
         ("job.failed", None),
         ("job.cancelled", None),
         ("task.created", None),
+        ("task.evaluating", None),
         ("task.completed", None),
         ("task.failed", None),
         ("task.cancelled", None),
+        ("task.eval_failed", None),
     ]
 
     all_events = []
@@ -54,12 +58,31 @@ async def rebuild_state(supervisor) -> None:
                     goal=event.data.get("goal", ""),
                     source_event_id=event.data.get("source_trigger_id", ""),
                     spec={},
+                    eval_spec=(
+                        EvalSpec.model_validate(event.data.get("eval_spec"))
+                        if event.data.get("eval_spec")
+                        else None
+                    ),
                 )
-        elif event.type in {"task.completed", "task.failed", "task.cancelled"}:
+        elif event.type == "task.evaluating":
+            task_id = event.data.get("task_id", "")
+            task = supervisor.state.tasks.get(task_id)
+            if task is not None:
+                task.state = "evaluating"
+                task.eval_spawned = True
+                task.eval_job_id = event.data.get("eval_job_id", "")
+                if event.data.get("result"):
+                    task.result = TaskResult.model_validate(event.data["result"])
+        elif event.type in {"task.completed", "task.failed", "task.cancelled", "task.eval_failed"}:
             task_id = event.data.get("task_id", "")
             if task_id:
-                state = event.type.split(".")[1]
+                state = "eval_failed" if event.type == "task.eval_failed" else event.type.split(".")[1]
                 await supervisor.scheduler.mark_task_terminal(task_id=task_id, state=state)
+                task = supervisor.state.tasks.get(task_id)
+                if task is not None:
+                    task.state = state
+                    if event.data.get("result"):
+                        task.result = TaskResult.model_validate(event.data["result"])
 
         await supervisor._handle_event(event, replay=True)
 

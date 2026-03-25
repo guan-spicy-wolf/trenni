@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from yoitsu_contracts.conditions import evaluate_condition
+from yoitsu_contracts.events import EvalSpec
 
 from .state import SpawnedJob, SupervisorState, TaskRecord
 
@@ -66,12 +67,14 @@ class Scheduler:
         goal: str,
         source_event_id: str,
         spec: dict,
+        eval_spec: EvalSpec | None = None,
     ) -> None:
         self.state.tasks[task_id] = TaskRecord(
             task_id=task_id,
             goal=goal,
             source_event_id=source_event_id,
             spec=spec,
+            eval_spec=eval_spec,
         )
 
     async def mark_task_terminal(

@@ -2,27 +2,35 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 from yoitsu_contracts.conditions import condition_from_data, condition_to_data
-from yoitsu_contracts.config import JobContextConfig
+from yoitsu_contracts.config import EvalContextConfig, JobContextConfig, JoinContextConfig
 from yoitsu_contracts.events import (
+    EvalSpec,
     JobCancelledData,
     JobCompletedData,
     JobFailedData,
+    SemanticVerdict,
     SpawnRequestData,
+    StructuralVerdict,
     SupervisorCheckpointData,
     SupervisorJobEnqueuedData,
     SupervisorJobLaunchedData,
-    TriggerData,
-    TaskCreatedData,
-    TaskCompletedData,
-    TaskFailedData,
     TaskCancelledData,
+    TaskCompletedData,
+    TaskCreatedData,
+    TaskEvalFailedData,
+    TaskEvaluatingData,
+    TaskFailedData,
+    TaskResult,
+    TaskTraceEntry,
+    TriggerData,
 )
 
 from .checkpoint import mark_exited_jobs, reap_timed_out_jobs
@@ -34,7 +42,7 @@ from .runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
 from .runtime_types import ContainerState, JobHandle
 from .scheduler import Scheduler
 from .spawn_handler import SpawnHandler
-from .state import SpawnDefaults, SpawnedJob, SupervisorState
+from .state import SpawnDefaults, SpawnedJob, SupervisorState, TaskRecord
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +74,7 @@ class Supervisor:
         self._completed_jobs = self.state.completed_jobs
         self._failed_jobs = self.state.failed_jobs
         self._job_summaries = self.state.job_summaries
+        self._job_git_refs = self.state.job_git_refs
         self._processed_event_ids = self.state.processed_event_ids
         self._processing_event_ids: set[str] = set()
         self._event_processing_lock = asyncio.Lock()
@@ -272,7 +281,7 @@ class Supervisor:
                         await self._handle_job_started(event, replay=replay)
                     case "supervisor.job.launched":
                         self._register_replayed_launch(event)
-                    case "task.created" | "task.completed" | "task.failed" | "task.cancelled":
+                    case "task.created" | "task.evaluating" | "task.completed" | "task.failed" | "task.cancelled" | "task.eval_failed":
                         pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
         except Exception:
             if event.id:
@@ -297,8 +306,8 @@ class Supervisor:
             logger.warning("Ignoring trigger event %s with no goal", event.id)
             return
 
-        task_id = self._stable_id(kind="root-task", source_event_id=event.id)
-        root_job_id = self._stable_id(kind="root-job", source_event_id=event.id)
+        task_id = self._root_task_id(event.id)
+        root_job_id = f"{task_id}-root"
 
         self.scheduler.record_task_submission(
             task_id=task_id,
@@ -365,6 +374,7 @@ class Supervisor:
                         parent_task_id=parent_id,
                         goal=task.goal,
                         source_trigger_id=task.source_event_id,
+                        eval_spec=task.eval_spec,
                     ).model_dump(mode="json"),
                     idempotency_key=self._event_idempotency_key(
                         source_event_id=event.id,
@@ -383,6 +393,12 @@ class Supervisor:
     async def _enqueue(self, job: SpawnedJob, *, replay: bool = False) -> list[SpawnedJob]:
         cancelled = await self.scheduler.enqueue(job)
         queue_state = "cancelled" if cancelled else "pending" if job.job_id in self._pending else "ready"
+        task = self.state.tasks.get(job.task_id or "")
+        if task is not None:
+            if not self._is_eval_job(job) and job.job_id not in task.job_order:
+                task.job_order.append(job.job_id)
+            if not task.terminal and not task.eval_spawned and queue_state in {"pending", "ready"}:
+                task.state = "pending" if queue_state == "pending" else "running"
 
         if not replay:
             await self.client.emit(
@@ -462,6 +478,9 @@ class Supervisor:
             or event.data.get("reason")
             or ""
         )
+        git_ref = str(event.data.get("git_ref") or "")
+        if git_ref:
+            self._job_git_refs[job_id] = git_ref
 
         handle = self.jobs.pop(job_id, None)
         task_id = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).task_id
@@ -475,6 +494,8 @@ class Supervisor:
 
         if handle is not None and not replay:
             await self._cleanup_handle(handle, failed=is_failure or is_cancelled)
+
+        if not replay:
             await self._evaluate_task_termination(job_id=job_id, task_id=task_id, event=event)
 
         if cancelled and not replay:
@@ -483,47 +504,234 @@ class Supervisor:
     async def _evaluate_task_termination(self, job_id: str, task_id: str, event: Event) -> None:
         if not task_id:
             return
-        
+
         task = self.state.tasks.get(task_id)
         if task is None or task.terminal:
             return
 
-        if not self._has_remaining_jobs(task_id):
-            if event.type == "job.failed":
-                state = "failed"
-                await self.scheduler.mark_task_terminal(task_id=task_id, state="failed")
-                await self.client.emit(
-                    "task.failed",
-                    TaskFailedData(task_id=task_id, reason=event.data.get("error", "Job failed")).model_dump(mode="json")
-                )
-                await self._cascade_cancel(task_id, reason=f"Parent or sibling failed: {event.data.get('error', '')}")
-            elif event.type == "job.cancelled":
-                state = "cancelled"
-                await self.scheduler.mark_task_terminal(task_id=task_id, state="cancelled")
-                await self.client.emit(
-                    "task.cancelled",
-                    TaskCancelledData(task_id=task_id, reason=event.data.get("reason", "Job cancelled")).model_dump(mode="json")
-                )
-                await self._cascade_cancel(task_id, reason=f"Parent or sibling cancelled: {event.data.get('reason', '')}")
-            else:
-                state = "completed"
-                await self.scheduler.mark_task_terminal(task_id=task_id, state="completed")
-                await self.client.emit(
-                    "task.completed",
-                    TaskCompletedData(task_id=task_id, summary=event.data.get("summary", "")).model_dump(mode="json")
-                )
+        job = self.state.jobs_by_id.get(job_id)
+        if self._is_eval_job(job):
+            await self._settle_eval_job(task=task, event=event)
+            return
 
-    def _has_remaining_jobs(self, task_id: str) -> bool:
+        if self._has_remaining_productive_jobs(task_id):
+            return
+
+        structural = self._build_structural_verdict(task_id)
+        trace = self._build_task_trace(task_id)
+        result = TaskResult(
+            structural=structural,
+            semantic=SemanticVerdict(verdict="unknown"),
+            trace=trace,
+        )
+        task.result = result
+
+        if task.eval_spec and not task.eval_spawned:
+            eval_job_id = self._eval_job_id(task_id)
+            task.eval_spawned = True
+            task.eval_job_id = eval_job_id
+            task.state = "evaluating"
+            await self.client.emit(
+                "task.evaluating",
+                TaskEvaluatingData(task_id=task_id, eval_job_id=eval_job_id, result=result).model_dump(mode="json"),
+            )
+            await self._enqueue(self._build_eval_job(task, eval_job_id), replay=False)
+            return
+
+        final_state = self._structural_terminal_state(structural)
+        reason = (
+            event.data.get("error")
+            or event.data.get("reason")
+            or event.data.get("summary")
+            or ""
+        )
+        await self._emit_task_terminal(task_id=task_id, state=final_state, result=result, reason=reason)
+
+    async def _settle_eval_job(self, *, task: TaskRecord, event: Event) -> None:
+        result = task.result or TaskResult(
+            structural=self._build_structural_verdict(task.task_id),
+            semantic=SemanticVerdict(verdict="unknown"),
+            trace=self._build_task_trace(task.task_id),
+        )
+
+        if event.type == "job.completed":
+            result.semantic = self._semantic_from_eval_event(event.data)
+            task.result = result
+            final_state = self._semantic_terminal_state(result.semantic, result.structural)
+            await self._emit_task_terminal(
+                task_id=task.task_id,
+                state=final_state,
+                result=result,
+                reason=result.semantic.summary,
+            )
+            return
+
+        reason = event.data.get("error") or event.data.get("reason") or "Eval job failed"
+        result.semantic = SemanticVerdict(verdict="unknown", summary=reason)
+        task.result = result
+        await self.scheduler.mark_task_terminal(task_id=task.task_id, state="eval_failed")
+        task.state = "eval_failed"
+        await self.client.emit(
+            "task.eval_failed",
+            TaskEvalFailedData(task_id=task.task_id, reason=reason, result=result).model_dump(mode="json"),
+        )
+
+    async def _emit_task_terminal(self, *, task_id: str, state: str, result: TaskResult, reason: str = "") -> None:
+        await self.scheduler.mark_task_terminal(task_id=task_id, state=state)
+        task = self.state.tasks.get(task_id)
+        if task is not None:
+            task.state = state
+            task.result = result
+
+        if state == "completed":
+            summary = (
+                result.semantic.summary
+                or next((entry.summary for entry in reversed(result.trace) if entry.summary), "")
+            )
+            await self.client.emit(
+                "task.completed",
+                TaskCompletedData(task_id=task_id, summary=summary, result=result).model_dump(mode="json"),
+            )
+            return
+
+        if state == "failed":
+            fail_reason = reason or result.semantic.summary or "Task failed"
+            await self.client.emit(
+                "task.failed",
+                TaskFailedData(task_id=task_id, reason=fail_reason, result=result).model_dump(mode="json"),
+            )
+            await self._cascade_cancel(task_id, reason=f"Parent or sibling failed: {fail_reason}")
+            return
+
+        if state == "cancelled":
+            cancel_reason = reason or "Task cancelled"
+            await self.client.emit(
+                "task.cancelled",
+                TaskCancelledData(task_id=task_id, reason=cancel_reason, result=result).model_dump(mode="json"),
+            )
+            await self._cascade_cancel(task_id, reason=f"Parent or sibling cancelled: {cancel_reason}")
+            return
+
+        await self.client.emit(
+            "task.eval_failed",
+            TaskEvalFailedData(task_id=task_id, reason=reason or "Eval failed", result=result).model_dump(mode="json"),
+        )
+
+    def _has_remaining_productive_jobs(self, task_id: str) -> bool:
         for job_id, job in self.state.jobs_by_id.items():
-            if job.task_id == task_id and job_id not in self.state.completed_jobs:
+            if job.task_id != task_id or self._is_eval_job(job):
+                continue
+            if job_id not in self.state.completed_jobs:
                 return True
         for job_id, job in self.state.pending_jobs.items():
-            if job.task_id == task_id:
+            if job.task_id == task_id and not self._is_eval_job(job):
                 return True
         for job in list(self.state.ready_queue._queue):
-            if job.task_id == task_id:
+            if job.task_id == task_id and not self._is_eval_job(job):
                 return True
         return False
+
+    @staticmethod
+    def _is_eval_job(job: SpawnedJob | None) -> bool:
+        if job is None:
+            return False
+        return bool(job.job_context and job.job_context.eval is not None)
+
+    def _build_structural_verdict(self, task_id: str) -> StructuralVerdict:
+        verdict = StructuralVerdict()
+        for job_id in self._task_trace_job_ids(task_id):
+            if job_id in self.state.failed_jobs:
+                verdict.failed += 1
+            elif job_id in self.state.cancelled_jobs:
+                verdict.cancelled += 1
+            elif job_id in self.state.completed_jobs:
+                verdict.success += 1
+            else:
+                verdict.unknown += 1
+        return verdict
+
+    def _build_task_trace(self, task_id: str) -> list[TaskTraceEntry]:
+        trace: list[TaskTraceEntry] = []
+        for job_id in self._task_trace_job_ids(task_id):
+            job = self.state.jobs_by_id.get(job_id)
+            if job is None:
+                continue
+            if job_id in self.state.failed_jobs:
+                outcome = "failed"
+            elif job_id in self.state.cancelled_jobs:
+                outcome = "cancelled"
+            elif job_id in self.state.completed_jobs:
+                outcome = "success"
+            else:
+                outcome = "unknown"
+            trace.append(
+                TaskTraceEntry(
+                    job_id=job_id,
+                    role=job.role,
+                    outcome=outcome,
+                    summary=self.state.job_summaries.get(job_id, ""),
+                    git_ref=self.state.job_git_refs.get(job_id, ""),
+                )
+            )
+        return trace
+
+    def _task_trace_job_ids(self, task_id: str) -> list[str]:
+        record = self.state.tasks.get(task_id)
+        ordered = list(record.job_order) if record else []
+        seen = set(ordered)
+        for job_id, job in self.state.jobs_by_id.items():
+            if job.task_id != task_id or self._is_eval_job(job) or job_id in seen:
+                continue
+            ordered.append(job_id)
+            seen.add(job_id)
+        return ordered
+
+    @staticmethod
+    def _structural_terminal_state(structural: StructuralVerdict) -> str:
+        if structural.failed > 0 or structural.unknown > 0:
+            return "failed"
+        if structural.cancelled > 0:
+            return "cancelled"
+        return "completed"
+
+    @staticmethod
+    def _semantic_terminal_state(semantic: SemanticVerdict, structural: StructuralVerdict) -> str:
+        if semantic.verdict == "pass":
+            return "completed"
+        if semantic.verdict == "fail":
+            return "failed"
+        return Supervisor._structural_terminal_state(structural)
+
+    @staticmethod
+    def _semantic_from_eval_event(data: dict[str, Any]) -> SemanticVerdict:
+        raw = (data.get("summary") or "").strip()
+        if not raw:
+            return SemanticVerdict(verdict="unknown", summary="")
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            status = str(data.get("status") or "").strip().lower()
+            if status in {"failed", "fail"}:
+                verdict = "fail"
+            elif status in {"complete", "completed", "success", "pass"}:
+                verdict = "pass"
+            else:
+                verdict = "unknown"
+            return SemanticVerdict(verdict=verdict, summary=raw)
+
+        verdict = str(parsed.get("verdict", "unknown")).strip().lower()
+        if verdict not in {"pass", "fail", "unknown"}:
+            verdict = "unknown"
+        summary = str(parsed.get("summary", "")).strip()
+        criteria_results = parsed.get("criteria_results")
+        if not isinstance(criteria_results, list):
+            criteria_results = []
+        return SemanticVerdict(
+            verdict=verdict,
+            summary=summary,
+            criteria_results=[item for item in criteria_results if isinstance(item, dict)],
+        )
 
     async def _cascade_cancel(self, task_id: str, reason: str) -> None:
         prefix = task_id + "/"
@@ -532,9 +740,14 @@ class Supervisor:
         for tid, record in list(self.state.tasks.items()):
             if tid.startswith(prefix) and not record.terminal:
                 await self.scheduler.mark_task_terminal(task_id=tid, state="cancelled")
+                record.state = "cancelled"
                 await self.client.emit(
                     "task.cancelled",
-                    TaskCancelledData(task_id=tid, reason=reason).model_dump(mode="json")
+                    TaskCancelledData(
+                        task_id=tid,
+                        reason=reason,
+                        result=record.result or TaskResult(),
+                    ).model_dump(mode="json")
                 )
         
         for job_id, job in list(self.state.jobs_by_id.items()):
@@ -596,7 +809,16 @@ class Supervisor:
         await rebuild_state(self)
 
     async def _handle_job_started(self, event: Event, *, replay: bool = False) -> None:
-        pass  # We no longer redundantly update task states to in_progress based on job.started
+        job_id = event.data.get("job_id", "")
+        if not job_id:
+            return
+        job = self.state.jobs_by_id.get(job_id)
+        if job is None:
+            return
+        task = self.state.tasks.get(job.task_id)
+        if task is None or task.terminal or task.state == "evaluating":
+            return
+        task.state = "running"
 
     async def _launch(
         self,
@@ -801,12 +1023,89 @@ class Supervisor:
 
 
     @staticmethod
-    def _stable_id(*, kind: str, source_event_id: str) -> str:
-        if source_event_id:
-            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"yoitsu/trenni/{kind}/{source_event_id}"))
-        import uuid_utils
+    def _root_task_id(source_event_id: str) -> str:
+        hex_only = "".join(ch for ch in (source_event_id or "").lower() if ch in "0123456789abcdef")
+        if len(hex_only) >= 16:
+            return hex_only[:16]
+        digest = hashlib.sha256((source_event_id or "").encode("utf-8")).hexdigest()
+        return digest[:16]
 
-        return str(uuid_utils.uuid7())
+    @staticmethod
+    def _eval_job_id(task_id: str) -> str:
+        return f"{task_id}-eval"
+
+    def _direct_child_task_ids(self, parent_task_id: str) -> list[str]:
+        prefix = parent_task_id + "/"
+        parent_depth = parent_task_id.count("/")
+        children: list[str] = []
+        for task_id in self.state.tasks:
+            if not task_id.startswith(prefix):
+                continue
+            if task_id.count("/") == parent_depth + 1:
+                children.append(task_id)
+        return sorted(children)
+
+    def _build_eval_job(self, task: TaskRecord, eval_job_id: str) -> SpawnedJob:
+        eval_spec = task.eval_spec or EvalSpec()
+        role = eval_spec.role or "default"
+        base_job = next(
+            (
+                self.state.jobs_by_id[job_id]
+                for job_id in reversed(task.job_order)
+                if job_id in self.state.jobs_by_id and not self._is_eval_job(self.state.jobs_by_id[job_id])
+            ),
+            None,
+        )
+        child_task_ids = self._direct_child_task_ids(task.task_id)
+        return SpawnedJob(
+            job_id=eval_job_id,
+            source_event_id=task.source_event_id,
+            task=self._eval_prompt(task.goal, eval_spec),
+            role=role,
+            repo=base_job.repo if base_job else "",
+            init_branch=base_job.init_branch if base_job else "main",
+            evo_sha=base_job.evo_sha if base_job else None,
+            llm_overrides={},
+            workspace_overrides={},
+            publication_overrides={},
+            task_id=task.task_id,
+            parent_job_id=base_job.parent_job_id if base_job else "",
+            job_context=JobContextConfig(
+                join=(
+                    None
+                    if not child_task_ids
+                    else JoinContextConfig(
+                        parent_job_id=base_job.job_id if base_job else "",
+                        parent_task_id=task.task_id,
+                        parent_summary=task.goal,
+                        child_task_ids=child_task_ids,
+                    )
+                ),
+                eval=EvalContextConfig(
+                    task_id=task.task_id,
+                    goal=task.goal,
+                    deliverables=list(eval_spec.deliverables),
+                    criteria=list(eval_spec.criteria),
+                    structural=(task.result.structural.model_dump(mode="json") if task.result else {}),
+                    child_task_ids=child_task_ids,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _eval_prompt(goal: str, spec: EvalSpec) -> str:
+        deliverables = "\n".join(f"- {item}" for item in spec.deliverables) or "- (not provided)"
+        criteria = "\n".join(f"- {item}" for item in spec.criteria) or "- (not provided)"
+        return (
+            "You are the evaluator for task semantic quality.\n"
+            "Assess whether the task goal is truly met using the provided context.\n"
+            "Return a single JSON object in task_complete(summary=...) with fields:\n"
+            '{"verdict":"pass|fail|unknown","summary":"...","criteria_results":[{"criterion":"...","result":"pass|fail|unknown","evidence":"..."}]}\n'
+            "Do not perform rework and do not mutate workflow state.\n\n"
+            f"Original goal:\n{goal}\n\n"
+            f"Expected deliverables:\n{deliverables}\n\n"
+            f"Verification criteria:\n{criteria}\n"
+        )
 
     @staticmethod
     def _event_idempotency_key(*, source_event_id: str, event_type: str, entity_id: str) -> str | None:

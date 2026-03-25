@@ -116,8 +116,9 @@ async def test_handle_spawn_creates_children_no_continuation():
     assert sup._ready_queue.qsize() == 2
     c0 = sup._ready_queue.get_nowait()
     c1 = sup._ready_queue.get_nowait()
-    assert c0.job_id == "parent-1-c0"
-    assert c1.job_id == "parent-1-c1"
+    assert c0.job_id.startswith("parent-1-c")
+    assert c1.job_id.startswith("parent-1-c")
+    assert c0.job_id != c1.job_id
     assert c0.task == "child A"
     assert c0.role == "worker"
     assert c0.depends_on == frozenset()

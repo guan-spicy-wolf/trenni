@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass
 
 from yoitsu_contracts.conditions import (
@@ -9,7 +11,7 @@ from yoitsu_contracts.conditions import (
     TaskIsCondition,
 )
 from yoitsu_contracts.config import JobContextConfig, JoinContextConfig
-from yoitsu_contracts.events import SpawnRequestData
+from yoitsu_contracts.events import EvalSpec, SpawnRequestData
 
 from .state import SpawnDefaults, SpawnedJob, TaskRecord, SupervisorState
 
@@ -33,17 +35,20 @@ class SpawnHandler:
         if parent_job is None and parent_defaults is None:
             raise ValueError(f"Unknown parent job {parent_job_id!r}")
 
+        parent_task_id = parent_job.task_id if parent_job and parent_job.task_id else parent_job_id
         wait_for, on_fail = self._normalize_strategy(payload.wait_for, payload.on_fail)
-        child_defs: list[tuple[str, str, str, str, str, str, str | None, dict, dict, dict]] = []
+        child_defs: list[
+            tuple[str, str, str, str, str, str, str | None, dict, dict, dict, EvalSpec | None]
+        ] = []
 
         for index, child in enumerate(payload.tasks):
             prompt = child.prompt.strip()
             if not prompt:
                 continue
 
-            parent_task_id = parent_job.task_id if parent_job and parent_job.task_id else parent_job_id
-            task_id = f"{parent_task_id}/{index}"
-            job_id = f"{parent_job_id}-c{index}"
+            token = self._id_hash(f"{parent_task_id}:{event.id}:{index}")
+            task_id = f"{parent_task_id}/{token}"
+            job_id = f"{parent_job_id}-c{token}"
             spec = child.job_spec
 
             role = spec.role or self._inherit("role", parent_job, parent_defaults, "default")
@@ -72,6 +77,7 @@ class SpawnHandler:
                     llm,
                     workspace,
                     publication,
+                    child.eval_spec,
                 )
             )
 
@@ -86,13 +92,14 @@ class SpawnHandler:
                     "repo": repo,
                     "init_branch": init_branch,
                     "evo_sha": evo_sha,
-                }
+                },
+                eval_spec=eval_spec,
             )
-            for task_id, _, prompt, role, repo, init_branch, evo_sha, *_ in child_defs
+            for task_id, _, prompt, role, repo, init_branch, evo_sha, *_, eval_spec in child_defs
         ]
 
         jobs: list[SpawnedJob] = []
-        for task_id, job_id, prompt, role, repo, init_branch, evo_sha, llm, workspace, publication in child_defs:
+        for task_id, job_id, prompt, role, repo, init_branch, evo_sha, llm, workspace, publication, _ in child_defs:
             sibling_ids = [candidate for candidate in child_task_ids if candidate != task_id]
             guard_conditions = []
 
@@ -139,9 +146,10 @@ class SpawnHandler:
             )
 
         if parent_job is not None and child_task_ids:
+            join_token = self._id_hash(f"{parent_task_id}:{event.id}:join")
             jobs.append(
                 SpawnedJob(
-                    job_id=f"{parent_job_id}-join",
+                    job_id=f"{parent_job_id}-j{join_token}",
                     source_event_id=event.id,
                     task=parent_job.task,
                     role=parent_job.role,
@@ -203,3 +211,9 @@ class SpawnHandler:
         if defaults is not None and hasattr(defaults, name):
             return getattr(defaults, name)
         return fallback
+
+    @staticmethod
+    def _id_hash(seed: str, *, length: int = 4) -> str:
+        digest = hashlib.sha256(seed.encode("utf-8")).digest()
+        token = base64.b32encode(digest).decode("ascii").lower().rstrip("=")
+        return token[:length]
