@@ -209,6 +209,39 @@ async def test_handle_event_realtime_advances_cursor_and_delays_poll():
 
 
 @pytest.mark.asyncio
+async def test_handle_event_marks_processed_only_after_success():
+    sup = _make_supervisor()
+    sup.client.emit = AsyncMock()
+    sup._generate_job_id = MagicMock(side_effect=["task-1", "job-1"])
+    event = _evt(
+        "evt-retry",
+        "trigger.external",
+        {"goal": "do X", "context": {"role": "default"}},
+    )
+
+    original = sup._handle_trigger
+    first = True
+
+    async def flaky_handle_trigger(evt, *, replay=False):
+        nonlocal first
+        if first:
+            first = False
+            raise RuntimeError("boom")
+        return await original(evt, replay=replay)
+
+    sup._handle_trigger = flaky_handle_trigger
+
+    with pytest.raises(RuntimeError):
+        await sup._handle_event(event)
+
+    assert "evt-retry" not in sup._processed_event_ids
+
+    await sup._handle_event(event)
+    assert "evt-retry" in sup._processed_event_ids
+    assert sup._ready_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
 async def test_enqueue_immediate_goes_to_ready():
     sup = _make_supervisor()
     job = SpawnedJob("j1", "e1", "t", "r", "/r", "main", None)

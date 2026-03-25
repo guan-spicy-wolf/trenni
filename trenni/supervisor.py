@@ -64,6 +64,8 @@ class Supervisor:
         self._failed_jobs = self.state.failed_jobs
         self._job_summaries = self.state.job_summaries
         self._processed_event_ids = self.state.processed_event_ids
+        self._processing_event_ids: set[str] = set()
+        self._event_processing_lock = asyncio.Lock()
         self._launched_event_ids = self.state.launched_event_ids
         self._spawn_defaults_by_job = self.state.spawn_defaults_by_job
 
@@ -252,25 +254,40 @@ class Supervisor:
             self._advance_cursor_from_event(event)
             self._reset_webhook_poll_deadline()
 
-        if event.id in self._processed_event_ids:
-            return
-        self._processed_event_ids.add(event.id)
+        if event.id:
+            async with self._event_processing_lock:
+                if (
+                    event.id in self._processed_event_ids
+                    or event.id in self._processing_event_ids
+                ):
+                    return
+                self._processing_event_ids.add(event.id)
 
-        if event.type.startswith("trigger."):
-            await self._handle_trigger(event, replay=replay)
-            return
-
-        match event.type:
-            case "job.spawn.request":
-                await self._handle_spawn(event, replay=replay)
-            case "job.completed" | "job.failed" | "job.cancelled":
-                await self._handle_job_done(event, replay=replay)
-            case "job.started":
-                await self._handle_job_started(event, replay=replay)
-            case "supervisor.job.launched":
-                self._register_replayed_launch(event)
-            case "task.created" | "task.completed" | "task.failed" | "task.cancelled":
-                pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
+        try:
+            if event.type.startswith("trigger."):
+                await self._handle_trigger(event, replay=replay)
+            else:
+                match event.type:
+                    case "job.spawn.request":
+                        await self._handle_spawn(event, replay=replay)
+                    case "job.completed" | "job.failed" | "job.cancelled":
+                        await self._handle_job_done(event, replay=replay)
+                    case "job.started":
+                        await self._handle_job_started(event, replay=replay)
+                    case "supervisor.job.launched":
+                        self._register_replayed_launch(event)
+                    case "task.created" | "task.completed" | "task.failed" | "task.cancelled":
+                        pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
+        except Exception:
+            if event.id:
+                async with self._event_processing_lock:
+                    self._processing_event_ids.discard(event.id)
+            raise
+        else:
+            if event.id:
+                async with self._event_processing_lock:
+                    self._processing_event_ids.discard(event.id)
+                    self._processed_event_ids.add(event.id)
 
     async def _handle_trigger(self, event: Event, *, replay: bool = False) -> None:
         if event.id in self._launched_event_ids and not replay:
