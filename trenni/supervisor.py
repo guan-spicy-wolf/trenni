@@ -27,6 +27,7 @@ from yoitsu_contracts.events import (
     TaskCreatedData,
     TaskEvalFailedData,
     TaskEvaluatingData,
+    TaskPartialData,
     TaskFailedData,
     TaskResult,
     TaskTraceEntry,
@@ -75,6 +76,7 @@ class Supervisor:
         self._failed_jobs = self.state.failed_jobs
         self._job_summaries = self.state.job_summaries
         self._job_git_refs = self.state.job_git_refs
+        self._job_completion_codes = self.state.job_completion_codes
         self._processed_event_ids = self.state.processed_event_ids
         self._processing_event_ids: set[str] = set()
         self._event_processing_lock = asyncio.Lock()
@@ -281,7 +283,7 @@ class Supervisor:
                         await self._handle_job_started(event, replay=replay)
                     case "supervisor.job.launched":
                         self._register_replayed_launch(event)
-                    case "task.created" | "task.evaluating" | "task.completed" | "task.failed" | "task.cancelled" | "task.eval_failed":
+                    case "task.created" | "task.evaluating" | "task.completed" | "task.failed" | "task.partial" | "task.cancelled" | "task.eval_failed":
                         pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
         except Exception:
             if event.id:
@@ -481,6 +483,9 @@ class Supervisor:
         git_ref = str(event.data.get("git_ref") or "")
         if git_ref:
             self._job_git_refs[job_id] = git_ref
+        completion_code = str(event.data.get("code") or "")
+        if completion_code:
+            self._job_completion_codes[job_id] = completion_code
 
         handle = self.jobs.pop(job_id, None)
         task_id = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).task_id
@@ -603,6 +608,14 @@ class Supervisor:
             await self._cascade_cancel(task_id, reason=f"Parent or sibling failed: {fail_reason}")
             return
 
+        if state == "partial":
+            partial_reason = reason or result.semantic.summary or "Task budget exhausted before completion"
+            await self.client.emit(
+                "task.partial",
+                TaskPartialData(task_id=task_id, reason=partial_reason, result=result).model_dump(mode="json"),
+            )
+            return
+
         if state == "cancelled":
             cancel_reason = reason or "Task cancelled"
             await self.client.emit(
@@ -626,7 +639,7 @@ class Supervisor:
         for job_id, job in self.state.pending_jobs.items():
             if job.task_id == task_id and not self._is_eval_job(job):
                 return True
-        for job in list(self.state.ready_queue._queue):
+        for job in self.state.ready_queue_snapshot():
             if job.task_id == task_id and not self._is_eval_job(job):
                 return True
         return False
@@ -644,6 +657,8 @@ class Supervisor:
                 verdict.failed += 1
             elif job_id in self.state.cancelled_jobs:
                 verdict.cancelled += 1
+            elif self.state.job_completion_codes.get(job_id) == "budget_exhausted":
+                verdict.partial += 1
             elif job_id in self.state.completed_jobs:
                 verdict.success += 1
             else:
@@ -660,6 +675,8 @@ class Supervisor:
                 outcome = "failed"
             elif job_id in self.state.cancelled_jobs:
                 outcome = "cancelled"
+            elif self.state.job_completion_codes.get(job_id) == "budget_exhausted":
+                outcome = "partial"
             elif job_id in self.state.completed_jobs:
                 outcome = "success"
             else:
@@ -690,12 +707,16 @@ class Supervisor:
     def _structural_terminal_state(structural: StructuralVerdict) -> str:
         if structural.failed > 0 or structural.unknown > 0:
             return "failed"
+        if structural.partial > 0:
+            return "partial"
         if structural.cancelled > 0:
             return "cancelled"
         return "completed"
 
     @staticmethod
     def _semantic_terminal_state(semantic: SemanticVerdict, structural: StructuralVerdict) -> str:
+        if structural.partial > 0:
+            return "partial"
         if semantic.verdict == "pass":
             return "completed"
         if semantic.verdict == "fail":

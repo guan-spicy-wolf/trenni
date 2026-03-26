@@ -5,6 +5,8 @@ Trenni is the scheduler and isolation control plane for the [Yoitsu](https://git
 It owns:
 
 - task progression
+- structural verdict computation
+- semantic eval-job orchestration
 - condition evaluation for spawned jobs
 - queue drain and capacity control
 - replay from Pasloe
@@ -22,6 +24,22 @@ It does not execute agent logic itself.
 - `checkpoint.py`: container reap and checkpoint payload generation
 - `isolation.py`: backend protocol
 - `podman_backend.py`: current isolation implementation
+
+## Task Lifecycle
+
+Trenni currently exposes these task states:
+
+- `pending`
+- `running`
+- `evaluating`
+- `completed`
+- `failed`
+- `partial`
+- `cancelled`
+- `eval_failed`
+
+Replay-safe intake is anchored on `supervisor.job.enqueued`. Poll/webhook cursor
+advancement happens only after intake succeeds.
 
 ## Control API
 

@@ -30,6 +30,7 @@ async def rebuild_state(supervisor) -> None:
         ("task.evaluating", None),
         ("task.completed", None),
         ("task.failed", None),
+        ("task.partial", None),
         ("task.cancelled", None),
         ("task.eval_failed", None),
     ]
@@ -73,7 +74,7 @@ async def rebuild_state(supervisor) -> None:
                 task.eval_job_id = event.data.get("eval_job_id", "")
                 if event.data.get("result"):
                     task.result = TaskResult.model_validate(event.data["result"])
-        elif event.type in {"task.completed", "task.failed", "task.cancelled", "task.eval_failed"}:
+        elif event.type in {"task.completed", "task.failed", "task.partial", "task.cancelled", "task.eval_failed"}:
             task_id = event.data.get("task_id", "")
             if task_id:
                 state = "eval_failed" if event.type == "task.eval_failed" else event.type.split(".")[1]

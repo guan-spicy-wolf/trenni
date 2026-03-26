@@ -10,6 +10,7 @@ import pytest
 from trenni.config import TrenniConfig
 from trenni.pasloe_client import Event
 from trenni.runtime_types import ContainerState, JobHandle, JobRuntimeSpec
+from trenni.state import TaskRecord
 from trenni.supervisor import SpawnDefaults, SpawnedJob, Supervisor
 
 
@@ -385,6 +386,26 @@ async def test_handle_job_done_caches_summary():
         "job_id": "j1", "summary": "all good",
     }))
     assert sup._job_summaries["j1"] == "all good"
+
+
+@pytest.mark.asyncio
+async def test_handle_job_budget_exhausted_emits_task_partial():
+    sup = _make_supervisor()
+    sup.client.emit = AsyncMock()
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="goal")
+    sup.state.jobs_by_id["j1"] = SpawnedJob("j1", "e1", "goal", "default", "/r", "main", None, task_id="t1")
+
+    await sup._handle_job_done(_evt("d1", "job.completed", {
+        "job_id": "j1",
+        "summary": "stopped at budget",
+        "code": "budget_exhausted",
+    }))
+
+    emitted = [call.args for call in sup.client.emit.await_args_list]
+    assert any(event_type == "task.partial" for event_type, _ in emitted)
+    payload = next(data for event_type, data in emitted if event_type == "task.partial")
+    assert payload["task_id"] == "t1"
+    assert payload["result"]["structural"]["partial"] == 1
 
 
 @pytest.mark.asyncio

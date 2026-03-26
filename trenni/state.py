@@ -74,6 +74,7 @@ class SupervisorState:
     cancelled_jobs: set[str] = field(default_factory=set)
     job_summaries: dict[str, str] = field(default_factory=dict)
     job_git_refs: dict[str, str] = field(default_factory=dict)
+    job_completion_codes: dict[str, str] = field(default_factory=dict)
     processed_event_ids: set[str] = field(default_factory=set)
     launched_event_ids: set[str] = field(default_factory=set)
     spawn_defaults_by_job: dict[str, SpawnDefaults] = field(default_factory=dict)
@@ -96,8 +97,19 @@ class SupervisorState:
     def remove_pending_job(self, job_id: str) -> SpawnedJob | None:
         return self.pending_jobs.pop(job_id, None)
 
+    def ready_queue_snapshot(self) -> list[SpawnedJob]:
+        items: list[SpawnedJob] = []
+        while True:
+            try:
+                items.append(self.ready_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for item in items:
+            self.ready_queue.put_nowait(item)
+        return items
+
     def has_ready_job(self, job_id: str) -> bool:
-        return any(job.job_id == job_id for job in list(self.ready_queue._queue))
+        return any(job.job_id == job_id for job in self.ready_queue_snapshot())
 
     def drop_from_ready_queue(self, job_id: str) -> None:
         survivors: list[SpawnedJob] = []
