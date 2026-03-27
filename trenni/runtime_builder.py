@@ -126,6 +126,8 @@ class RuntimeSpecBuilder:
         return JobRuntimeSpec(
             job_id=job_id,
             source_event_id=source_event_id,
+            # Child task IDs use '/' as hierarchy separator (e.g. "abc123/fv7o-eval"),
+            # which is invalid in Podman container names. Replace with '-'.
             container_name=f"yoitsu-job-{job_id.replace('/', '-')}",
             image=self.defaults.image,
             pod_name=self.defaults.pod_name,
