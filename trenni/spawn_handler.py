@@ -12,6 +12,7 @@ from yoitsu_contracts.conditions import (
 )
 from yoitsu_contracts.config import JobContextConfig, JoinContextConfig
 from yoitsu_contracts.events import EvalSpec, SpawnRequestData
+from yoitsu_contracts.role_metadata import RoleMetadataReader
 
 from .state import SpawnDefaults, SpawnedJob, TaskRecord, SupervisorState
 
@@ -23,8 +24,9 @@ class SpawnPlan:
 
 
 class SpawnHandler:
-    def __init__(self, state: SupervisorState) -> None:
+    def __init__(self, state: SupervisorState, role_reader: RoleMetadataReader | None = None) -> None:
         self.state = state
+        self._role_reader = role_reader  # ADR-0004 D1a: for max_cost validation
 
     def expand(self, event) -> SpawnPlan:
         payload = SpawnRequestData.model_validate(event.data)
@@ -63,6 +65,15 @@ class SpawnHandler:
             # Per ADR-0007: llm/workspace/publication overrides removed
             # budget goes to single channel (handled by runtime_builder)
             budget = child.budget
+            
+            # ADR-0004 D1a: Validate budget against role's max_cost
+            if budget and budget > 0 and self._role_reader:
+                role_meta = self._role_reader.get_definition(role)
+                if role_meta and budget > role_meta.max_cost:
+                    raise ValueError(
+                        f"Spawn budget ${budget:.2f} exceeds role '{role}' max_cost ${role_meta.max_cost:.2f}. "
+                        f"Decompose into smaller tasks."
+                    )
             
             team = self._inherit("team", parent_job, parent_defaults, "default")
 

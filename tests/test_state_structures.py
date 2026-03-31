@@ -5,6 +5,131 @@ It does not carry execution config overrides (llm, workspace, publication).
 """
 
 import pytest
+import tempfile
+from pathlib import Path
+
+
+def test_spawn_handler_rejects_budget_above_max_cost():
+    """Spawn is rejected if budget exceeds role's max_cost (ADR-0004 D1a)."""
+    from trenni.spawn_handler import SpawnHandler
+    from trenni.state import SupervisorState, SpawnedJob
+    from yoitsu_contracts.role_metadata import RoleMetadataReader
+    from yoitsu_contracts.events import SpawnRequestData
+
+    # Create a mock evo directory with a role that has max_cost=0.50
+    with tempfile.TemporaryDirectory() as tmpdir:
+        evo_path = Path(tmpdir)
+        roles_dir = evo_path / "roles"
+        roles_dir.mkdir()
+        (roles_dir / "planner.py").write_text('''
+from palimpsest.runtime import role
+
+@role(
+    name="planner",
+    description="Test planner",
+    min_cost=0.10,
+    max_cost=0.50,  # Low max_cost
+)
+def planner_role(**params):
+    pass
+''')
+        
+        state = SupervisorState()
+        role_reader = RoleMetadataReader(evo_path)
+        handler = SpawnHandler(state, role_reader)
+        
+        # Add a parent job to the state
+        parent_job = SpawnedJob(
+            job_id="parent-123",
+            source_event_id="evt-1",
+            task="Parent task",
+            role="planner",
+            repo="https://github.com/org/repo",
+            init_branch="main",
+            evo_sha="abc123",
+            budget=1.0,
+            task_id="parent-task",
+            team="default",
+        )
+        state.jobs_by_id[parent_job.job_id] = parent_job
+        state.spawn_defaults_by_job[parent_job.job_id] = parent_job
+        
+        # Try to spawn with budget=10.0 which exceeds max_cost=0.50
+        payload = SpawnRequestData(
+            job_id="parent-123",
+            tasks=[{
+                "goal": "Test task",
+                "role": "planner",
+                "budget": 10.0,  # Exceeds max_cost=0.50
+            }]
+        )
+        
+        # Create a proper event object
+        from types import SimpleNamespace
+        event = SimpleNamespace(id="test-event", data=payload.model_dump())
+        
+        with pytest.raises(ValueError, match="max_cost"):
+            handler.expand(event)
+
+
+def test_spawn_handler_accepts_budget_within_max_cost():
+    """Spawn is accepted if budget is within role's max_cost (ADR-0004 D1a)."""
+    from trenni.spawn_handler import SpawnHandler
+    from trenni.state import SupervisorState, SpawnedJob
+    from yoitsu_contracts.role_metadata import RoleMetadataReader
+    from yoitsu_contracts.events import SpawnRequestData
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        evo_path = Path(tmpdir)
+        roles_dir = evo_path / "roles"
+        roles_dir.mkdir()
+        (roles_dir / "implementer.py").write_text('''
+from palimpsest.runtime import role
+
+@role(
+    name="implementer",
+    description="Test implementer",
+    min_cost=0.10,
+    max_cost=2.00,
+)
+def implementer_role(**params):
+    pass
+''')
+        
+        state = SupervisorState()
+        role_reader = RoleMetadataReader(evo_path)
+        handler = SpawnHandler(state, role_reader)
+        
+        parent_job = SpawnedJob(
+            job_id="parent-123",
+            source_event_id="evt-1",
+            task="Parent task",
+            role="implementer",
+            repo="https://github.com/org/repo",
+            init_branch="main",
+            evo_sha="abc123",
+            budget=1.0,
+            task_id="parent-task",
+            team="default",
+        )
+        state.jobs_by_id[parent_job.job_id] = parent_job
+        state.spawn_defaults_by_job[parent_job.job_id] = parent_job
+        
+        # Spawn with budget=1.5 which is within max_cost=2.00
+        payload = SpawnRequestData(
+            job_id="parent-123",
+            tasks=[{
+                "goal": "Test task",
+                "role": "implementer",
+                "budget": 1.5,  # Within max_cost=2.00
+            }]
+        )
+        
+        from types import SimpleNamespace
+        event = SimpleNamespace(id="test-event", data=payload.model_dump())
+        
+        plan = handler.expand(event)
+        assert len(plan.jobs) > 0
 
 
 def test_spawned_job_no_execution_overrides():
