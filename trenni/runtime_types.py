@@ -25,11 +25,12 @@ class JobRuntimeSpec:
     source_event_id: str
     container_name: str
     image: str
-    pod_name: str
+    pod_name: str | None  # None = no pod
     labels: Mapping[str, str]
     env: Mapping[str, str]
     command: tuple[str, ...]
     config_payload_b64: str
+    extra_networks: tuple[str, ...] = ()  # Additional networks to attach
 
 
 @dataclass
