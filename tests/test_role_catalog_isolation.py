@@ -175,6 +175,30 @@ def factorio_worker(**params):
         with pytest.raises(FileNotFoundError):
             supervisor._resolve_role_metadata("nonexistent-role")
 
+    def test_resolve_team_definition_factorio_shadows_global_worker(self, evo_with_same_named_roles: Path):
+        """Factorio team should have exactly one 'worker' role (its own), not two."""
+        from trenni.supervisor import Supervisor
+        from trenni.config import TrenniConfig
+
+        config = TrenniConfig(evo_root=str(evo_with_same_named_roles))
+        supervisor = Supervisor(config)
+
+        factorio_def = supervisor._resolve_team_definition("factorio")
+
+        # Count worker occurrences
+        worker_count = sum(1 for role in factorio_def.roles if role == "worker")
+        assert worker_count == 1, (
+            f"Factorio should have exactly 1 'worker' role, got {worker_count}. "
+            f"Roles: {factorio_def.roles}. "
+            f"Team-specific worker should SHADOW global, not add alongside."
+        )
+
+        # worker_roles should also have exactly one entry
+        assert len(factorio_def.worker_roles) == 1, (
+            f"Factorio should have exactly 1 worker_role, got {len(factorio_def.worker_roles)}: "
+            f"{factorio_def.worker_roles}"
+        )
+
 
 class TestRoleCatalogStructure:
     """Tests for the new catalog structure with team-aware storage."""
@@ -314,3 +338,31 @@ def beta_worker(**params):
         assert alpha_def is not None
         # Alpha team should have worker role (preferably alpha's version)
         assert "worker" in alpha_def.roles
+
+    def test_resolve_team_definition_no_duplicate_role_names(self, evo_with_overlapping_roles: Path):
+        """Team-specific roles should SHADOW (not duplicate) global roles.
+
+        Per ADR-0011: team-specific 'worker' should replace global 'worker',
+        not appear alongside it.
+        """
+        from trenni.supervisor import Supervisor
+        from trenni.config import TrenniConfig
+        from collections import Counter
+
+        config = TrenniConfig(evo_root=str(evo_with_overlapping_roles))
+        supervisor = Supervisor(config)
+
+        # Test all three teams
+        for team_name in ["alpha", "beta", "gamma", "default"]:
+            team_def = supervisor._resolve_team_definition(team_name)
+
+            # Count occurrences of each role name
+            role_counts = Counter(team_def.roles)
+
+            # No role name should appear more than once
+            duplicates = {name: count for name, count in role_counts.items() if count > 1}
+            assert not duplicates, (
+                f"Team {team_name!r} has duplicate role names: {duplicates}. "
+                f"Team-specific roles should shadow global, not add alongside. "
+                f"Roles: {team_def.roles}"
+            )

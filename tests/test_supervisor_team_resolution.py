@@ -343,7 +343,10 @@ def evaluator(**params):
         assert "worker" in team_def.roles  # Global worker
 
     def test_resolve_team_prefers_team_specific_planner(self, tmp_path: Path):
-        """Team-specific planner is preferred over global planner."""
+        """Team-specific planner with same name shadows global planner.
+
+        Per ADR-0011 D2: team-specific 'planner' replaces global 'planner'.
+        """
         from trenni.supervisor import Supervisor
         from trenni.config import TrenniConfig
 
@@ -370,7 +373,7 @@ def worker(**params):
     pass
 ''')
 
-        # Team-specific roles for "backend"
+        # Team-specific roles for "backend" with SAME NAMES (shadowing)
         teams_dir = evo_root / "teams"
         backend_dir = teams_dir / "backend"
         backend_roles = backend_dir / "roles"
@@ -379,7 +382,7 @@ def worker(**params):
         (backend_roles / "planner.py").write_text('''
 from palimpsest.runtime import role
 
-@role(name="backend-planner", description="Backend planner", role_type="planner")
+@role(name="planner", description="Backend planner", role_type="planner")
 def backend_planner(**params):
     pass
 ''')
@@ -387,7 +390,7 @@ def backend_planner(**params):
         (backend_roles / "worker.py").write_text('''
 from palimpsest.runtime import role
 
-@role(name="backend-worker", description="Backend worker", role_type="worker")
+@role(name="worker", description="Backend worker", role_type="worker")
 def backend_worker(**params):
     pass
 ''')
@@ -397,9 +400,12 @@ def backend_worker(**params):
 
         team_def = supervisor._resolve_team_definition("backend")
 
-        # Backend team should use backend-specific planner
-        assert team_def.planner_role == "backend-planner"
-        assert "backend-worker" in team_def.roles
+        # Backend team should use backend-specific planner (same name, shadows global)
+        assert team_def.planner_role == "planner"
+        assert "worker" in team_def.roles
+        # Verify no duplicates (shadowing works)
+        assert len([r for r in team_def.roles if r == "planner"]) == 1
+        assert len([r for r in team_def.roles if r == "worker"]) == 1
 
     def test_resolve_team_includes_both_global_and_team_roles(self, tmp_path: Path):
         """Team definition includes both global roles (teams=*) and team-specific roles."""

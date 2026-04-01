@@ -1404,40 +1404,32 @@ class Supervisor:
         team_name = (name or "default").strip() or "default"
         catalog = self._load_role_catalog()
 
-        # Per ADR-0011 D2/D3: Find roles available to this team
-        # With new catalog structure, we need to flatten entries:
-        # - Global roles (entry["global"]) are available to all teams
-        # - Team-specific roles (entry["teams"][team_name]) are only for that team
+        # Per ADR-0011 D2: Build deduplicated member list with shadowing.
+        # Team-specific roles shadow global roles of the same name.
+        # For each role name, prefer team-specific over global.
+        seen_names: set[str] = set()
         members: list[dict[str, Any]] = []
-        for role_name, entry in catalog.items():
-            # Global roles available to all teams
-            global_role = entry.get("global")
-            if global_role:
-                members.append(global_role)
 
-            # Team-specific roles for this team
+        for role_name, entry in catalog.items():
+            # Prefer team-specific over global (shadowing semantics per ADR-0011 D2)
             team_roles = entry.get("teams", {})
             if team_name in team_roles:
+                # Team-specific version exists - use it, skip global
                 members.append(team_roles[team_name])
+                seen_names.add(role_name)
+            elif entry.get("global"):
+                # No team-specific version, use global
+                members.append(entry["global"])
+                seen_names.add(role_name)
 
         if not members:
             if team_name == "default":
                 return _DEFAULT_TEAM_DEFINITION
             raise FileNotFoundError(f"No roles found for team {team_name!r}")
 
-        # Prefer team-specific planners/evaluators over global ones
-        # If team has its own planner, exclude global planners
-        team_planners = [m for m in members if m["role_type"] == "planner" and m.get("source_team") == team_name]
-        global_planners = [m for m in members if m["role_type"] == "planner" and m.get("source_team") is None]
-
-        team_evaluators = [m for m in members if m["role_type"] == "evaluator" and m.get("source_team") == team_name]
-        global_evaluators = [m for m in members if m["role_type"] == "evaluator" and m.get("source_team") is None]
-
-        # Use team-specific planners if available, otherwise global
-        planners = team_planners if team_planners else global_planners
-        evaluators = team_evaluators if team_evaluators else global_evaluators
-
-        # Workers are additive (both global and team-specific)
+        # Categorize by role_type (no duplicates possible now)
+        planners = [m for m in members if m["role_type"] == "planner"]
+        evaluators = [m for m in members if m["role_type"] == "evaluator"]
         workers = [m for m in members if m["role_type"] == "worker"]
 
         planner_names = [m["name"] for m in planners]
