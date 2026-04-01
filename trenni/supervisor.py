@@ -550,7 +550,13 @@ class Supervisor:
             self._job_completion_codes[job_id] = completion_code
 
         handle = self.jobs.pop(job_id, None)
-        task_id = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).task_id
+        job_record = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None))
+        task_id = job_record.task_id
+        team = job_record.team
+        
+        # ADR-0011 D5: Track running jobs per team for launch conditions
+        if team:
+            self.state.decrement_team_running(team)
         
         _, cancelled = await self.scheduler.record_job_terminal(
             job_id=job_id,
@@ -856,7 +862,14 @@ class Supervisor:
 
         for handle, logs in reaped:
             self.jobs.pop(handle.job_id, None)
-            task_id = self.state.jobs_by_id[handle.job_id].task_id if handle.job_id in self.state.jobs_by_id else handle.job_id
+            job_record = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None))
+            task_id = job_record.task_id if handle.job_id in self.state.jobs_by_id else handle.job_id
+            team = job_record.team
+            
+            # ADR-0011 D5: Track running jobs per team for launch conditions
+            if team:
+                self.state.decrement_team_running(team)
+            
             await self.scheduler.record_job_terminal(
                 job_id=handle.job_id,
                 summary=f"Container exited without terminal event (exit_code={handle.exit_code})",
@@ -967,6 +980,10 @@ class Supervisor:
             job_context=job_context or self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).job_context,
             parent_job_id=parent_job_id,
         )
+        
+        # ADR-0011 D5: Track running jobs per team for launch conditions
+        self.state.increment_team_running(team)
+        
         self._spawn_defaults_by_job[job_id] = SpawnDefaults(
             repo=repo,
             init_branch=init_branch,

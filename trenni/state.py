@@ -82,6 +82,29 @@ class SpawnDefaults:
 
 
 @dataclass
+class TeamLaunchCondition:
+    """Launch condition checking team concurrent job limit.
+
+    Per ADR-0011 D5: per-team launch conditions, not scheduling policy.
+    The scheduler evaluates this condition alongside existing depends_on and
+    structural conditions. The scheduler itself has no team awareness.
+    """
+    team: str
+    max_concurrent: int
+
+    def is_satisfied(self, state: SupervisorState) -> bool:
+        """Check if team has room for another concurrent job.
+
+        Returns True if:
+        - max_concurrent <= 0 (no limit)
+        - running_count < max_concurrent
+        """
+        if self.max_concurrent <= 0:
+            return True  # No limit
+        return state.running_count_for_team(self.team) < self.max_concurrent
+
+
+@dataclass
 class TaskRecord:
     task_id: str
     goal: str
@@ -114,6 +137,21 @@ class SupervisorState:
     processed_event_ids: set[str] = field(default_factory=set)
     launched_event_ids: set[str] = field(default_factory=set)
     spawn_defaults_by_job: dict[str, SpawnDefaults] = field(default_factory=dict)
+    running_jobs_by_team: dict[str, int] = field(default_factory=dict)
+
+    def increment_team_running(self, team: str) -> None:
+        """Increment running job count for a team."""
+        self.running_jobs_by_team[team] = self.running_jobs_by_team.get(team, 0) + 1
+
+    def decrement_team_running(self, team: str) -> None:
+        """Decrement running job count for a team (does not go below 0)."""
+        current = self.running_jobs_by_team.get(team, 0)
+        if current > 0:
+            self.running_jobs_by_team[team] = current - 1
+
+    def running_count_for_team(self, team: str) -> int:
+        """Get running job count for a team (returns 0 if team not present)."""
+        return self.running_jobs_by_team.get(team, 0)
 
     def task_states(self) -> dict[str, str]:
         return {
