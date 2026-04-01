@@ -153,6 +153,19 @@ class SupervisorState:
         """Get running job count for a team (returns 0 if team not present)."""
         return self.running_jobs_by_team.get(team, 0)
 
+    def replay_team_counts(self, running_jobs: list[tuple[str, str]]) -> None:
+        """Rebuild team running counts from running jobs after restart.
+
+        Args:
+            running_jobs: List of (job_id, team) tuples for jobs that were
+                          running before restart.
+
+        This is called during replay to restore accurate team capacity
+        tracking without double-counting jobs that are already running.
+        """
+        for job_id, team in running_jobs:
+            self.increment_team_running(team)
+
     def task_states(self) -> dict[str, str]:
         return {
             task_id: (record.terminal_state if record.terminal else (record.state or "pending"))

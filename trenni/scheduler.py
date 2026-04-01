@@ -164,15 +164,35 @@ class Scheduler:
         ready: list[SpawnedJob] = []
         cancelled: list[SpawnedJob] = []
 
+        # Track virtual team capacity consumed during this iteration.
+        # Jobs promoted to ready queue haven't launched yet, so their
+        # team running count isn't incremented. We need to track this
+        # to prevent over-promoting from same team in one iteration.
+        virtual_team_running: dict[str, int] = {}
+
         for job_id, job in list(self.state.pending_jobs.items()):
             outcome = self.evaluate_job(job)
             if outcome is True:
-                # Check team capacity before putting in ready queue
-                if self.has_team_capacity(job.team):
+                # Check team capacity including virtual jobs already promoted
+                team_config = self.teams.get(job.team)
+                if team_config is None or team_config.scheduling.max_concurrent_jobs <= 0:
+                    # No limit for this team
                     del self.state.pending_jobs[job_id]
                     await self.state.ready_queue.put(job)
                     ready.append(job)
-                # else: keep in pending, team at capacity
+                else:
+                    max_concurrent = team_config.scheduling.max_concurrent_jobs
+                    actual_running = self.state.running_count_for_team(job.team)
+                    virtual_running = virtual_team_running.get(job.team, 0)
+                    total_running = actual_running + virtual_running
+
+                    if total_running < max_concurrent:
+                        # Has capacity - promote and track virtual running
+                        del self.state.pending_jobs[job_id]
+                        await self.state.ready_queue.put(job)
+                        ready.append(job)
+                        virtual_team_running[job.team] = virtual_running + 1
+                    # else: keep in pending, team at capacity
             elif outcome is False:
                 del self.state.pending_jobs[job_id]
                 cancelled.append(job)

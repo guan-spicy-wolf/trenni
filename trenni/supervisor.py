@@ -237,6 +237,13 @@ class Supervisor:
                 self._pending[job.job_id] = job
                 continue
 
+            # Re-check team capacity right before launch (Issue 5 fix)
+            if not self.scheduler.has_team_capacity(job.team):
+                # Team at capacity - put back in pending
+                self._pending[job.job_id] = job
+                logger.debug("Job %s team %s at capacity, returning to pending", job.job_id, job.team)
+                continue
+
             while not self.scheduler.has_capacity() or not self._resume_event.is_set():
                 await asyncio.sleep(1.0)
                 evaluation = self.scheduler.evaluate_job(job)
@@ -245,6 +252,11 @@ class Supervisor:
                     break
                 if evaluation is None:
                     self._pending[job.job_id] = job
+                    break
+                # Re-check team capacity during wait loop
+                if not self.scheduler.has_team_capacity(job.team):
+                    self._pending[job.job_id] = job
+                    logger.debug("Job %s team %s at capacity during wait, returning to pending", job.job_id, job.team)
                     break
             else:
                 try:

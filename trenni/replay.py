@@ -44,6 +44,9 @@ async def rebuild_state(supervisor) -> None:
     started_job_ids: set[str] = set()
     finished_job_ids: set[str] = set()
 
+    # Collect running jobs with team info for rebuilding team counts
+    running_jobs_with_teams: list[tuple[str, str]] = []
+
     for event in all_events:
         if event.type == "supervisor.job.launched":
             launched_by_job[event.data.get("job_id", "")] = event
@@ -101,11 +104,14 @@ async def rebuild_state(supervisor) -> None:
         data = launched.data
         container_id = data.get("container_id", "")
         container_name = data.get("container_name", "")
+        team = data.get("team", "default")
         state = await supervisor._inspect_replay_state(container_id, container_name)
         handle = supervisor._handle_from_replay(job_id, container_id, container_name)
 
         if state.exists and (state.running or state.status in ACTIVE_CONTAINER_STATES):
             supervisor.jobs[job_id] = handle
+            # Collect for team count rebuilding
+            running_jobs_with_teams.append((job_id, team))
             continue
 
         job = supervisor.state.jobs_by_id.get(job_id)
@@ -136,6 +142,9 @@ async def rebuild_state(supervisor) -> None:
         cancelled = await supervisor.scheduler.enqueue(job)
         if cancelled:
             logger.info("Replay cancelled %s because its condition is already impossible", job_id)
+
+    # Rebuild team running counts from running jobs (Issue 5 fix)
+    supervisor.state.replay_team_counts(running_jobs_with_teams)
 
     logger.info(
         "Replay complete: running=%d pending=%d ready=%d tasks=%d",
