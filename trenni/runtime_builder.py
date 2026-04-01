@@ -7,7 +7,7 @@ import yaml
 from yoitsu_contracts.config import EventStoreConfig, JobConfig, JobContextConfig
 from yoitsu_contracts.env import build_git_auth_env
 
-from .config import TrenniConfig
+from .config import TeamRuntimeConfig, TrenniConfig
 from .runtime_types import JobRuntimeSpec, RuntimeDefaults
 
 build_git_credential_env = build_git_auth_env
@@ -43,6 +43,13 @@ class RuntimeSpecBuilder:
     def __init__(self, config: TrenniConfig, defaults: RuntimeDefaults) -> None:
         self.config = config
         self.defaults = defaults
+
+    def _get_team_runtime(self, team: str) -> TeamRuntimeConfig | None:
+        """Get runtime config for a team, or None if team not found."""
+        team_config = self.config.teams.get(team)
+        if team_config is None:
+            return None
+        return team_config.runtime
 
     def build(
         self,
@@ -110,10 +117,39 @@ class RuntimeSpecBuilder:
         )
         payload_b64 = base64.b64encode(payload_text.encode("utf-8")).decode("utf-8")
 
+        labels = {
+            **self.defaults.labels,
+            "io.yoitsu.job-id": job_id,
+            "io.yoitsu.source-event-id": source_event_id,
+            "io.yoitsu.runtime": self.defaults.kind,
+            "io.yoitsu.evo-sha": evo_sha or "",
+        }
+
+        # Get team runtime config and merge with defaults per ADR-0011 D4
+        team_runtime = self._get_team_runtime(team)
+
+        # Merge semantics per ADR-0011 D4:
+        # - image: team value overrides default if set (None = use default)
+        # - pod_name: team value overrides default if set (None = no pod)
+        # - env_allowlist: team value replaces default (not merged)
+        # - extra_networks: team value used (default is empty)
+        if team_runtime is not None:
+            image = team_runtime.image if team_runtime.image is not None else self.defaults.image
+            pod_name = team_runtime.pod_name  # None = no pod (explicit override)
+            env_allowlist = tuple(team_runtime.env_allowlist) if team_runtime.env_allowlist else self.defaults.env_allowlist
+            extra_networks = tuple(team_runtime.extra_networks)
+        else:
+            # Team not found, use all defaults
+            image = self.defaults.image
+            pod_name = self.defaults.pod_name
+            env_allowlist = self.defaults.env_allowlist
+            extra_networks = ()
+
+        # Rebuild env with team's env_allowlist
         env: dict[str, str] = {
             "PALIMPSEST_JOB_CONFIG_B64": payload_b64,
         }
-        for key in self.defaults.env_allowlist:
+        for key in env_allowlist:
             value = os.environ.get(key)
             if value:
                 env[key] = value
@@ -124,24 +160,17 @@ class RuntimeSpecBuilder:
 
         env.update(build_git_auth_env(self.defaults.git_token_env))
 
-        labels = {
-            **self.defaults.labels,
-            "io.yoitsu.job-id": job_id,
-            "io.yoitsu.source-event-id": source_event_id,
-            "io.yoitsu.runtime": self.defaults.kind,
-            "io.yoitsu.evo-sha": evo_sha or "",
-        }
-
         return JobRuntimeSpec(
             job_id=job_id,
             source_event_id=source_event_id,
             # Child task IDs use '/' as hierarchy separator (e.g. "abc123/fv7o-eval"),
             # which is invalid in Podman container names. Replace with '-'.
             container_name=f"yoitsu-job-{job_id.replace('/', '-')}",
-            image=self.defaults.image,
-            pod_name=self.defaults.pod_name,
+            image=image,
+            pod_name=pod_name,
             labels=labels,
             env=env,
             command=("palimpsest", "container-entrypoint"),
             config_payload_b64=payload_b64,
+            extra_networks=extra_networks,
         )

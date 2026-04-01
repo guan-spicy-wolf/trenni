@@ -1,0 +1,214 @@
+"""Tests for RuntimeSpecBuilder team runtime config integration."""
+
+import pytest
+
+from trenni.config import TrenniConfig, TeamConfig, TeamRuntimeConfig, TeamSchedulingConfig
+from trenni.runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
+from trenni.runtime_types import RuntimeDefaults
+
+
+def test_runtime_spec_builder_uses_team_config():
+    """RuntimeSpecBuilder selects runtime profile from team config.
+
+    Per ADR-0011 D4:
+    - image: team value overrides default if set (None = use default)
+    - pod_name: team value overrides default if set (None = no pod)
+    - env_allowlist: team value replaces default (not merged)
+    - extra_networks: team value used (default is empty)
+    """
+    # Create TrenniConfig with factorio team having custom runtime settings
+    config = TrenniConfig(
+        runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
+        teams={
+            "factorio": TeamConfig(
+                runtime=TeamRuntimeConfig(
+                    image="localhost/factorio-job:custom",
+                    pod_name="factorio-pod",
+                    env_allowlist=["FACTORIO_API_KEY", "CUSTOM_VAR"],
+                    extra_networks=["factorio-network", "shared-network"],
+                ),
+                scheduling=TeamSchedulingConfig(),
+            ),
+            "default": TeamConfig(
+                runtime=TeamRuntimeConfig(),  # No overrides
+                scheduling=TeamSchedulingConfig(),
+            ),
+        },
+    )
+
+    # Build defaults with base image
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///run/podman/podman.sock",
+        pod_name="default-pod",
+        image="localhost/default-image:latest",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={"io.yoitsu.managed-by": "trenni"},
+        env_allowlist=("DEFAULT_VAR1", "DEFAULT_VAR2"),
+        git_token_env="GITHUB_TOKEN",
+    )
+
+    builder = RuntimeSpecBuilder(config, defaults)
+
+    # Build spec for factorio team
+    spec = builder.build(
+        job_id="test-job-123",
+        source_event_id="evt-456",
+        task="test-task",
+        role="worker",
+        team="factorio",
+        repo="https://github.com/test/repo.git",
+        init_branch="main",
+        evo_sha=None,
+    )
+
+    # Assert: team runtime values override defaults
+    assert spec.image == "localhost/factorio-job:custom", "Team image should override default"
+    assert spec.pod_name == "factorio-pod", "Team pod_name should override default"
+    assert spec.extra_networks == ("factorio-network", "shared-network"), "Team extra_networks should be used"
+
+    # Assert: team env_allowlist replaces default (not merged)
+    # Note: env_allowlist affects which env vars are pulled into the spec
+    # The spec's env should have FACTORIO_API_KEY (if set) but not DEFAULT_VAR1
+    # We'll verify the method was called correctly by checking the spec construction
+
+
+def test_runtime_spec_builder_team_missing_image_uses_default():
+    """When team has no image override, use default image."""
+    config = TrenniConfig(
+        runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
+        teams={
+            "minimal": TeamConfig(
+                runtime=TeamRuntimeConfig(
+                    # image=None (default)
+                    pod_name="minimal-pod",
+                ),
+                scheduling=TeamSchedulingConfig(),
+            ),
+        },
+    )
+
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///run/podman/podman.sock",
+        pod_name="default-pod",
+        image="localhost/default-image:latest",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={},
+        env_allowlist=(),
+        git_token_env="GITHUB_TOKEN",
+    )
+
+    builder = RuntimeSpecBuilder(config, defaults)
+
+    spec = builder.build(
+        job_id="test-job-789",
+        source_event_id="evt-000",
+        task="test-task",
+        role="worker",
+        team="minimal",
+        repo="https://github.com/test/repo.git",
+        init_branch="main",
+        evo_sha=None,
+    )
+
+    # Assert: default image used when team has no override
+    assert spec.image == "localhost/default-image:latest", "Should use default image when team has none"
+    assert spec.pod_name == "minimal-pod", "Should use team pod_name when set"
+
+
+def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
+    """When team explicitly sets pod_name to None, job should have no pod."""
+    config = TrenniConfig(
+        runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
+        teams={
+            "no-pod-team": TeamConfig(
+                runtime=TeamRuntimeConfig(
+                    pod_name=None,  # Explicitly no pod
+                ),
+                scheduling=TeamSchedulingConfig(),
+            ),
+        },
+    )
+
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///run/podman/podman.sock",
+        pod_name="default-pod",  # Has default pod
+        image="localhost/default-image:latest",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={},
+        env_allowlist=(),
+        git_token_env="GITHUB_TOKEN",
+    )
+
+    builder = RuntimeSpecBuilder(config, defaults)
+
+    spec = builder.build(
+        job_id="test-job-nopod",
+        source_event_id="evt-nopod",
+        task="test-task",
+        role="worker",
+        team="no-pod-team",
+        repo="https://github.com/test/repo.git",
+        init_branch="main",
+        evo_sha=None,
+    )
+
+    # Assert: None pod_name means no pod
+    assert spec.pod_name is None, "Team pod_name=None should result in no pod"
+
+
+def test_runtime_spec_builder_unknown_team_uses_defaults():
+    """When team is not in config, use all defaults."""
+    config = TrenniConfig(
+        runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
+        teams={
+            # No "unknown-team" defined
+            "other": TeamConfig(
+                runtime=TeamRuntimeConfig(),
+                scheduling=TeamSchedulingConfig(),
+            ),
+        },
+    )
+
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///run/podman/podman.sock",
+        pod_name="default-pod",
+        image="localhost/default-image:latest",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={},
+        env_allowlist=("VAR1",),
+        git_token_env="GITHUB_TOKEN",
+    )
+
+    builder = RuntimeSpecBuilder(config, defaults)
+
+    spec = builder.build(
+        job_id="test-job-unknown",
+        source_event_id="evt-unknown",
+        task="test-task",
+        role="worker",
+        team="unknown-team",
+        repo="https://github.com/test/repo.git",
+        init_branch="main",
+        evo_sha=None,
+    )
+
+    # Assert: all defaults used for unknown team
+    assert spec.image == "localhost/default-image:latest"
+    assert spec.pod_name == "default-pod"
+    assert spec.extra_networks == ()
