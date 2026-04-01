@@ -38,6 +38,48 @@ class RuntimeConfig:
         )
 
 
+@dataclass
+class TeamRuntimeConfig:
+    image: str | None = None
+    pod_name: str | None = None
+    env_allowlist: list[str] = field(default_factory=list)
+    extra_networks: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "TeamRuntimeConfig":
+        payload = data or {}
+        return cls(
+            image=payload.get("image"),
+            pod_name=payload.get("pod_name"),
+            env_allowlist=list(payload.get("env_allowlist", [])),
+            extra_networks=list(payload.get("extra_networks", [])),
+        )
+
+
+@dataclass
+class TeamSchedulingConfig:
+    max_concurrent_jobs: int = 0  # 0 = unlimited
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "TeamSchedulingConfig":
+        payload = data or {}
+        return cls(max_concurrent_jobs=int(payload.get("max_concurrent_jobs", 0)))
+
+
+@dataclass
+class TeamConfig:
+    runtime: TeamRuntimeConfig = field(default_factory=TeamRuntimeConfig)
+    scheduling: TeamSchedulingConfig = field(default_factory=TeamSchedulingConfig)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "TeamConfig":
+        payload = data or {}
+        return cls(
+            runtime=TeamRuntimeConfig.from_dict(payload.get("runtime")),
+            scheduling=TeamSchedulingConfig.from_dict(payload.get("scheduling")),
+        )
+
+
 _LEGACY_RUNTIME_FIELDS = {
     "palimpsest_command",
     "evo_repo_path",
@@ -55,6 +97,7 @@ class TrenniConfig:
     evo_root: str = ""
 
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    teams: dict[str, TeamConfig] = field(default_factory=dict)
 
     max_workers: int = 4
     poll_interval: float = 2.0
@@ -95,9 +138,13 @@ class TrenniConfig:
         payload = {
             k: v
             for k, v in data.items()
-            if k in cls.__dataclass_fields__ and k != "runtime"
+            if k in cls.__dataclass_fields__ and k not in ("runtime", "teams")
         }
         payload["runtime"] = RuntimeConfig.from_dict(data.get("runtime"))
+        payload["teams"] = {
+            name: TeamConfig.from_dict(team_data)
+            for name, team_data in (data.get("teams") or {}).items()
+        }
         return cls(**payload)
 
     @property
