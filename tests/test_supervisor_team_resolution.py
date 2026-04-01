@@ -166,14 +166,14 @@ def frontend_worker(**params):
         assert "worker" in catalog
         assert "evaluator" in catalog
 
-        # Global roles should have teams = ["*"] (available to all)
-        assert catalog["planner"]["teams"] == ["*"]
-        assert catalog["worker"]["teams"] == ["*"]
-        assert catalog["evaluator"]["teams"] == ["*"]
+        # Global roles should have global version with teams = ["*"] (available to all)
+        assert catalog["planner"]["global"]["teams"] == ["*"]
+        assert catalog["worker"]["global"]["teams"] == ["*"]
+        assert catalog["evaluator"]["global"]["teams"] == ["*"]
 
         # source_team should be None for global roles
-        assert catalog["planner"]["source_team"] is None
-        assert catalog["worker"]["source_team"] is None
+        assert catalog["planner"]["global"]["source_team"] is None
+        assert catalog["worker"]["global"]["source_team"] is None
 
     def test_load_role_catalog_includes_team_specific_roles(self, temp_evo_root: Path):
         """Team-specific roles from evo/teams/<team>/roles/ are included."""
@@ -185,19 +185,24 @@ def frontend_worker(**params):
 
         catalog = supervisor._load_role_catalog()
 
-        # Backend team roles should be present
+        # Backend team roles should be present (no global version, only team-specific)
         assert "backend-planner" in catalog
         assert "backend-worker" in catalog
         assert "backend-evaluator" in catalog
 
-        # Backend roles should have teams = ["backend"]
-        assert catalog["backend-planner"]["teams"] == ["backend"]
-        assert catalog["backend-worker"]["teams"] == ["backend"]
-        assert catalog["backend-evaluator"]["teams"] == ["backend"]
+        # Backend roles should have teams dict containing "backend"
+        assert "backend" in catalog["backend-planner"]["teams"]
+        assert "backend" in catalog["backend-worker"]["teams"]
+        assert "backend" in catalog["backend-evaluator"]["teams"]
+
+        # The team-specific version should have teams = ["backend"]
+        assert catalog["backend-planner"]["teams"]["backend"]["teams"] == ["backend"]
+        assert catalog["backend-worker"]["teams"]["backend"]["teams"] == ["backend"]
+        assert catalog["backend-evaluator"]["teams"]["backend"]["teams"] == ["backend"]
 
         # source_team should indicate the team
-        assert catalog["backend-planner"]["source_team"] == "backend"
-        assert catalog["backend-worker"]["source_team"] == "backend"
+        assert catalog["backend-planner"]["teams"]["backend"]["source_team"] == "backend"
+        assert catalog["backend-worker"]["teams"]["backend"]["source_team"] == "backend"
 
     def test_load_role_catalog_multiple_teams_separate_roles(self, temp_evo_root: Path):
         """Roles from different teams are kept separate."""
@@ -213,9 +218,13 @@ def frontend_worker(**params):
         assert "frontend-planner" in catalog
         assert "frontend-worker" in catalog
 
-        # Frontend roles should have teams = ["frontend"]
-        assert catalog["frontend-planner"]["teams"] == ["frontend"]
-        assert catalog["frontend-worker"]["teams"] == ["frontend"]
+        # Frontend roles should have teams dict containing "frontend"
+        assert "frontend" in catalog["frontend-planner"]["teams"]
+        assert "frontend" in catalog["frontend-worker"]["teams"]
+
+        # The team-specific version should have teams = ["frontend"]
+        assert catalog["frontend-planner"]["teams"]["frontend"]["teams"] == ["frontend"]
+        assert catalog["frontend-worker"]["teams"]["frontend"]["teams"] == ["frontend"]
 
     def test_load_role_catalog_no_teams_directory(self, tmp_path: Path):
         """When no teams directory exists, only global roles are loaded."""
@@ -241,9 +250,9 @@ def planner_role(**params):
         catalog = supervisor._load_role_catalog()
 
         assert "planner" in catalog
-        assert catalog["planner"]["teams"] == ["*"]
+        assert catalog["planner"]["global"]["teams"] == ["*"]
         # No team-specific roles
-        assert all(meta["source_team"] is None for meta in catalog.values())
+        assert all(entry.get("global") and entry.get("global")["source_team"] is None for entry in catalog.values())
 
     def test_load_role_catalog_empty_roles_directory(self, tmp_path: Path):
         """Empty roles directories are handled gracefully."""
@@ -583,9 +592,9 @@ def worker(**params):
 
         catalog = supervisor._load_role_catalog()
 
-        # Global roles should have teams = ["*"], not ["default"]
-        assert catalog["planner"]["teams"] == ["*"]
-        assert catalog["worker"]["teams"] == ["*"]
+        # Global roles should have global version with teams = ["*"], not ["default"]
+        assert catalog["planner"]["global"]["teams"] == ["*"]
+        assert catalog["worker"]["global"]["teams"] == ["*"]
 
         # Both roles should be available to "other-team"
         team_def = supervisor._resolve_team_definition("other-team")

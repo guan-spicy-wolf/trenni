@@ -1139,6 +1139,12 @@ class Supervisor:
         - evo/roles/<name>.py → available to all teams (teams = ["*"])
         - evo/teams/<team>/roles/<name>.py → available only to <team> (teams = [team_name])
         Uses RoleMetadataReader from yoitsu-contracts for AST parsing.
+
+        Returns a dict keyed by role name, where each value is a dict containing:
+        - "global": the global role definition (if exists), or None
+        - "teams": {team_name: team_specific_definition, ...}
+
+        This structure preserves global roles when team-specific roles have the same name.
         """
         current_sha = self._read_evo_sha()
         
@@ -1161,15 +1167,18 @@ class Supervisor:
             reader = RoleMetadataReader(evo_root)
             for meta in reader.list_definitions():
                 catalog[meta.name] = {
-                    "name": meta.name,
-                    "description": meta.description,
-                    "role_type": meta.role_type,
-                    "teams": ["*"],  # Available to all teams (ADR-0011 D2)
-                    "min_cost": meta.min_cost,
-                    "recommended_cost": meta.recommended_cost,
-                    "max_cost": meta.max_cost,
-                    "min_capability": meta.min_capability,
-                    "source_team": None,  # Global role
+                    "global": {
+                        "name": meta.name,
+                        "description": meta.description,
+                        "role_type": meta.role_type,
+                        "teams": ["*"],  # Available to all teams (ADR-0011 D2)
+                        "min_cost": meta.min_cost,
+                        "recommended_cost": meta.recommended_cost,
+                        "max_cost": meta.max_cost,
+                        "min_capability": meta.min_capability,
+                        "source_team": None,  # Global role
+                    },
+                    "teams": {},  # No team-specific override yet
                 }
 
         # Scan team-specific roles (ADR-0011 D3)
@@ -1189,7 +1198,13 @@ class Supervisor:
                     meta = self._read_role_file(py_path, evo_root)
                     if meta is None:
                         continue
-                    catalog[meta.name] = {
+                    # Add to existing entry (global role exists with same name) or create new
+                    if meta.name not in catalog:
+                        catalog[meta.name] = {
+                            "global": None,  # No global version
+                            "teams": {},
+                        }
+                    catalog[meta.name]["teams"][team_name] = {
                         "name": meta.name,
                         "description": meta.description,
                         "role_type": meta.role_type,
@@ -1203,6 +1218,30 @@ class Supervisor:
 
         self._role_catalog_cache = catalog
         return catalog
+
+    def _get_role_for_team(self, role_name: str, team: str) -> dict[str, Any] | None:
+        """Get role definition for a specific team, preferring team-specific over global.
+
+        Args:
+            role_name: Name of the role to look up
+            team: Team name to resolve the role for
+
+        Returns:
+            Role definition dict, preferring team-specific version if available,
+            otherwise falling back to global version. Returns None if role not found.
+        """
+        catalog = self._load_role_catalog()
+        entry = catalog.get(role_name)
+        if not entry:
+            return None
+
+        # Prefer team-specific version
+        team_roles = entry.get("teams", {})
+        if team in team_roles:
+            return team_roles[team]
+
+        # Fallback to global version
+        return entry.get("global")
 
     def _read_role_file(self, py_path: Path, evo_root: Path) -> "RoleMetadata | None":
         """Read role metadata from a single Python file using AST parsing.
@@ -1279,17 +1318,57 @@ class Supervisor:
 
     def _validate_role_catalog(self) -> None:
         catalog = self._load_role_catalog()
-        team_names = sorted({team for meta in catalog.values() for team in meta.get("teams", [])})
+        # Collect all team names from the catalog structure
+        team_names = set()
+        for entry in catalog.values():
+            if entry.get("global"):
+                # Global roles are available to all teams
+                team_names.add("default")
+            team_names.update(entry.get("teams", {}).keys())
+        team_names = sorted(team_names)
         if "default" not in team_names:
             team_names.insert(0, "default")
         for team_name in team_names:
             self._resolve_team_definition(team_name)
 
-    def _resolve_role_metadata(self, role_name: str) -> dict[str, Any]:
+    def _resolve_role_metadata(self, role_name: str, team: str | None = None) -> dict[str, Any]:
+        """Resolve role metadata, optionally for a specific team.
+
+        Args:
+            role_name: Name of the role to look up
+            team: Optional team name. If provided, prefers team-specific version.
+                 If None, returns global version if available.
+
+        Returns:
+            Role definition dict.
+
+        Raises:
+            FileNotFoundError: If role not found for the given context.
+        """
         catalog = self._load_role_catalog()
         if role_name not in catalog:
             raise FileNotFoundError(f"Role definition not found: {role_name!r}")
-        return catalog[role_name]
+
+        entry = catalog[role_name]
+
+        # If team specified, prefer team-specific version
+        if team:
+            team_roles = entry.get("teams", {})
+            if team in team_roles:
+                return team_roles[team]
+
+        # Fallback to global version
+        global_role = entry.get("global")
+        if global_role:
+            return global_role
+
+        # No global version exists, but team-specific versions do
+        # This means the role only exists for specific teams
+        available_teams = list(entry.get("teams", {}).keys())
+        raise FileNotFoundError(
+            f"Role {role_name!r} not available for team {team!r}. "
+            f"Available teams: {available_teams}"
+        )
 
     def _allocated_job_budget(self, job: SpawnedJob) -> float:
         """Get the allocated budget for a job.
@@ -1309,7 +1388,7 @@ class Supervisor:
 
     def _validate_spawned_job_budget(self, job: SpawnedJob) -> str | None:
         try:
-            meta = self._resolve_role_metadata(job.role)
+            meta = self._resolve_role_metadata(job.role, team=job.team)
         except FileNotFoundError as exc:
             return str(exc)
         min_cost = float(meta.get("min_cost", 0.0) or 0.0)
@@ -1324,16 +1403,23 @@ class Supervisor:
     def _resolve_team_definition(self, name: str):
         team_name = (name or "default").strip() or "default"
         catalog = self._load_role_catalog()
-        
+
         # Per ADR-0011 D2/D3: Find roles available to this team
-        # - Global roles have teams = ["*"] (available to all)
-        # - Team-specific roles have teams = [team_name]
-        members = [
-            meta
-            for meta in catalog.values()
-            if "*" in meta.get("teams", []) or team_name in meta.get("teams", [])
-        ]
-        
+        # With new catalog structure, we need to flatten entries:
+        # - Global roles (entry["global"]) are available to all teams
+        # - Team-specific roles (entry["teams"][team_name]) are only for that team
+        members: list[dict[str, Any]] = []
+        for role_name, entry in catalog.items():
+            # Global roles available to all teams
+            global_role = entry.get("global")
+            if global_role:
+                members.append(global_role)
+
+            # Team-specific roles for this team
+            team_roles = entry.get("teams", {})
+            if team_name in team_roles:
+                members.append(team_roles[team_name])
+
         if not members:
             if team_name == "default":
                 return _DEFAULT_TEAM_DEFINITION
@@ -1343,17 +1429,17 @@ class Supervisor:
         # If team has its own planner, exclude global planners
         team_planners = [m for m in members if m["role_type"] == "planner" and m.get("source_team") == team_name]
         global_planners = [m for m in members if m["role_type"] == "planner" and m.get("source_team") is None]
-        
+
         team_evaluators = [m for m in members if m["role_type"] == "evaluator" and m.get("source_team") == team_name]
         global_evaluators = [m for m in members if m["role_type"] == "evaluator" and m.get("source_team") is None]
-        
+
         # Use team-specific planners if available, otherwise global
         planners = team_planners if team_planners else global_planners
         evaluators = team_evaluators if team_evaluators else global_evaluators
-        
+
         # Workers are additive (both global and team-specific)
         workers = [m for m in members if m["role_type"] == "worker"]
-        
+
         planner_names = [m["name"] for m in planners]
         evaluator_names = [m["name"] for m in evaluators]
         worker_names = [m["name"] for m in workers]
