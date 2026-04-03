@@ -306,6 +306,8 @@ class Supervisor:
         try:
             if event.type.startswith("trigger."):
                 await self._handle_trigger(event, replay=replay)
+            elif event.type == "external.event":
+                await self._handle_external_event(event, replay=replay)
             else:
                 match event.type:
                     case "agent.job.spawn_request":
@@ -344,6 +346,60 @@ class Supervisor:
             logger.warning("Invalid trigger event %s: %s", event.id, e)
             return
 
+        await self._process_trigger(event, data, replay=replay)
+
+    async def _handle_external_event(self, event: Event, *, replay: bool = False) -> None:
+        """Handle external events (CI failure, labeled issues/PRs).
+
+        Converts external events to TriggerData and processes them.
+        """
+        from yoitsu_contracts.external_events import (
+            CIFailureEvent,
+            IssueLabeledEvent,
+            PRLabeledEvent,
+            ci_failure_to_trigger,
+            issue_labeled_to_trigger,
+            pr_labeled_to_trigger,
+        )
+
+        event_type = event.data.get("event_type", "")
+        trigger_data = None
+
+        try:
+            if event_type == "ci_failure":
+                external = CIFailureEvent.model_validate(event.data)
+                trigger_data = ci_failure_to_trigger(external)
+            elif event_type == "issue_labeled":
+                external = IssueLabeledEvent.model_validate(event.data)
+                trigger_data = issue_labeled_to_trigger(external)
+            elif event_type == "pr_labeled":
+                external = PRLabeledEvent.model_validate(event.data)
+                trigger_data = pr_labeled_to_trigger(external)
+            else:
+                logger.warning("Unknown external event type: %s", event_type)
+                return
+        except Exception as e:
+            logger.warning("Invalid external event %s: %s", event.id, e)
+            return
+
+        if trigger_data is None:
+            logger.info("External event %s not mapped to trigger", event.id)
+            return
+
+        # Convert to TriggerData and process
+        try:
+            data = TriggerData.model_validate(trigger_data)
+        except Exception as e:
+            logger.warning("Invalid trigger data from external event %s: %s", event.id, e)
+            return
+
+        await self._process_trigger(event, data, replay=replay)
+
+    async def _process_trigger(self, event: Event, data: TriggerData, *, replay: bool = False) -> None:
+        """Process a trigger event after validation.
+
+        Shared logic for both direct triggers and external events.
+        """
         # goal is now required by pydantic (min_length=1), no need to check
 
         task_id = self._root_task_id(event.id)
