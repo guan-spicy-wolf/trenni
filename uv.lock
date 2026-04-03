@@ -443,7 +443,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "uuid-utils", specifier = ">=0.14.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
-    { name = "yoitsu-contracts", directory = "../yoitsu-contracts" },
+    { name = "yoitsu-contracts", editable = "../yoitsu-contracts" },
 ]
 
 [package.metadata.requires-dev]
@@ -713,7 +713,7 @@ wheels = [
 [[package]]
 name = "yoitsu-contracts"
 version = "0.1.0"
-source = { directory = "../yoitsu-contracts" }
+source = { editable = "../yoitsu-contracts" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },

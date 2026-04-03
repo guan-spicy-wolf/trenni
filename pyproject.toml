@@ -27,7 +27,7 @@ dev = [
 package = true
 
 [tool.uv.sources]
-yoitsu-contracts = { path = "../yoitsu-contracts" }
+yoitsu-contracts = { path = "../yoitsu-contracts", editable = true }
 
 [build-system]
 requires = ["hatchling"]
