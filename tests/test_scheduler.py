@@ -140,7 +140,7 @@ def test_scheduler_enqueue_checks_team_capacity():
     job1 = SpawnedJob(
         job_id="job-1",
         source_event_id="event-1",
-        task="Task 1",
+        goal="Task 1",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",
@@ -160,7 +160,7 @@ def test_scheduler_enqueue_checks_team_capacity():
     job2 = SpawnedJob(
         job_id="job-2",
         source_event_id="event-2",
-        task="Task 2",
+        goal="Task 2",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",
@@ -193,7 +193,7 @@ def test_scheduler_enqueue_different_teams_independent():
     job1 = SpawnedJob(
         job_id="job-1",
         source_event_id="event-1",
-        task="Task 1",
+        goal="Task 1",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",
@@ -208,7 +208,7 @@ def test_scheduler_enqueue_different_teams_independent():
     job2 = SpawnedJob(
         job_id="job-2",
         source_event_id="event-2",
-        task="Task 2",
+        goal="Task 2",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",
@@ -237,7 +237,7 @@ def test_scheduler_resolve_pending_respects_team_capacity():
     job = SpawnedJob(
         job_id="job-1",
         source_event_id="event-1",
-        task="Task 1",
+        goal="Task 1",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",
@@ -273,7 +273,7 @@ def test_scheduler_resolve_pending_promotes_when_team_has_capacity():
     job = SpawnedJob(
         job_id="job-1",
         source_event_id="event-1",
-        task="Task 1",
+        goal="Task 1",
         role="worker",
         repo="https://example.com/repo",
         init_branch="main",

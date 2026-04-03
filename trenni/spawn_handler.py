@@ -44,29 +44,25 @@ class SpawnHandler:
         ] = []
 
         for index, child in enumerate(payload.tasks):
-            goal = (child.goal or child.prompt).strip()
+            goal = child.goal.strip()
             if not goal:
                 continue
 
             token = self._id_hash(f"{parent_task_id}:{event.id}:{index}")
             task_id = f"{parent_task_id}/{token}"
             job_id = f"{parent_job_id}-c{token}"
-            role = child.role or "planner"  # ADR-0008 D1: default to planner when unspecified
-            
-            # Per ADR-0007: role_params contains only role-internal flags (not goal/budget)
-            role_params = dict(child.params or {})
-            # goal and budget are NOT written to role_params
-            
-            # repo is a first-class field; fall back to params for backward compat
-            repo = child.repo or child.params.get("repo") or self._inherit("repo", parent_job, parent_defaults, "")
-            init_branch = child.params.get("branch") or child.params.get("init_branch") or self._inherit("init_branch", parent_job, parent_defaults, "main")
+            role = child.role or "planner"
+
+            # role_params contains only role-internal flags
+            role_params = dict(child.params)
+
+            # Canonical fields only; no fallback to params
+            repo = child.repo or self._inherit("repo", parent_job, parent_defaults, "")
+            init_branch = child.init_branch or self._inherit("init_branch", parent_job, parent_defaults, "main")
             evo_sha = child.sha or self._inherit("evo_sha", parent_job, parent_defaults, None)
-            
-            # Per ADR-0007: llm/workspace/publication overrides removed
-            # budget goes to single channel (handled by runtime_builder)
             budget = child.budget
-            
-            # ADR-0004 D1a: Validate budget against role's max_cost
+
+            # Validate budget against role's max_cost
             if budget and budget > 0 and self._role_reader:
                 role_meta = self._role_reader.get_definition(role)
                 if role_meta and budget > role_meta.max_cost:
@@ -74,8 +70,8 @@ class SpawnHandler:
                         f"Spawn budget ${budget:.2f} exceeds role '{role}' max_cost ${role_meta.max_cost:.2f}. "
                         f"Decompose into smaller tasks."
                     )
-            
-            team = self._inherit("team", parent_job, parent_defaults, "default")
+
+            team = child.team or self._inherit("team", parent_job, parent_defaults, "default")
 
             child_defs.append(
                 (
@@ -146,13 +142,13 @@ class SpawnHandler:
                 SpawnedJob(
                     job_id=job_id,
                     source_event_id=event.id,
-                    task=goal,
+                    goal=goal,
                     role=role,
                     role_params=role_params,
                     repo=repo,
                     init_branch=init_branch,
                     evo_sha=evo_sha,
-                    budget=budget or 0.0,  # task semantics field
+                    budget=budget or 0.0,
                     task_id=task_id,
                     condition=self._combine_conditions(guard_conditions),
                     parent_job_id=parent_job_id,
@@ -162,30 +158,30 @@ class SpawnHandler:
 
         if parent_job is not None and child_task_ids:
             join_token = self._id_hash(f"{parent_task_id}:{event.id}:join")
-            join_task = self._join_task_instruction(parent_job.task)
-            
-            # Per ADR-0007: join role_params contains only mode="join"
+            join_task = self._join_task_instruction(parent_job.goal)
+
+            # join role_params contains only mode="join"
             # parent_goal goes to JobContextConfig.join.parent_summary
             join_role_params = {"mode": "join"}
-            
+
             jobs.append(
                 SpawnedJob(
                     job_id=f"{parent_job_id}-j{join_token}",
                     source_event_id=event.id,
-                    task=join_task,
+                    goal=join_task,
                     role=parent_job.role,
                     role_params=join_role_params,
                     repo=parent_job.repo,
                     init_branch=parent_job.init_branch,
                     evo_sha=parent_job.evo_sha,
-                    budget=parent_job.budget,  # inherit budget from parent
+                    budget=parent_job.budget,
                     task_id=parent_job.task_id or payload.task_id or parent_job.job_id,
                     condition=self._join_condition(child_task_ids, wait_for),
                     job_context=JobContextConfig(
                         join=JoinContextConfig(
                             parent_job_id=parent_job_id,
                             parent_task_id=parent_job.task_id or payload.task_id or parent_job.job_id,
-                            parent_summary=parent_job.task,
+                            parent_summary=parent_job.goal,
                             child_task_ids=child_task_ids,
                         )
                     ),

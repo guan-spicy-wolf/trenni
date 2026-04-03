@@ -59,14 +59,14 @@ async def test_handle_trigger_enqueues():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
     event = _evt("evt-abc", "trigger.external.received",
-                 {"goal": "do X", "budget": 0.5, "context": {"role": "default", "repo": "/r", "init_branch": "main"}})
+                 {"goal": "do X", "budget": 0.5, "role": "default", "repo": "/r", "init_branch": "main"})
 
     await sup._handle_trigger(event)
 
     assert sup._ready_queue.qsize() == 1
     job = sup._ready_queue.get_nowait()
     assert job.source_event_id == "evt-abc"
-    assert job.task == "do X"
+    assert job.goal == "do X"
     assert job.depends_on == frozenset()
 
 
@@ -83,7 +83,7 @@ async def test_handle_trigger_with_team_defaults_to_planner_role():
             roles=["implementer"],
         )
     )
-    event = _evt("evt-team", "trigger.external.received", {"goal": "plan X", "team": "backend", "context": {}})
+    event = _evt("evt-team", "trigger.external.received", {"goal": "plan X", "team": "backend"})
 
     await sup._handle_trigger(event)
 
@@ -115,7 +115,7 @@ async def test_handle_trigger_rejects_budget_below_role_min_cost():
     event = _evt(
         "evt-budget",
         "trigger.external.received",
-        {"goal": "plan X", "team": "backend", "budget": 0.1, "context": {}},
+        {"goal": "plan X", "team": "backend", "budget": 0.1},
     )
 
     await sup._handle_trigger(event)
@@ -133,7 +133,7 @@ async def test_handle_trigger_budget_propagates_to_root_job():
     event = _evt(
         "evt-root-budget",
         "trigger.external.received",
-        {"goal": "do X", "budget": 0.75, "context": {"role": "default", "repo": "/r", "init_branch": "main"}},
+        {"goal": "do X", "budget": 0.75, "role": "default", "repo": "/r", "init_branch": "main"},
     )
 
     await sup._handle_trigger(event)
@@ -149,7 +149,7 @@ async def test_handle_trigger_deduplicates():
     sup.client.emit = AsyncMock()
     sup._launched_event_ids.add("evt-dup")
     event = _evt("evt-dup", "trigger.external.received",
-                 {"goal": "do X", "context": {"role": "default"}})
+                 {"goal": "do X", "role": "default"})
 
     await sup._handle_trigger(event)
     assert sup._ready_queue.qsize() == 0
@@ -159,7 +159,7 @@ async def test_handle_trigger_deduplicates():
 async def test_handle_trigger_ignores_empty_goal():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    event = _evt("evt-empty", "trigger.external.received", {"goal": "", "context": {"role": "default"}})
+    event = _evt("evt-empty", "trigger.external.received", {"goal": "", "role": "default"})
 
     await sup._handle_trigger(event)
     assert sup._ready_queue.qsize() == 0
@@ -181,8 +181,8 @@ async def test_handle_spawn_creates_children_no_continuation():
     event = _evt("spawn-1", "agent.job.spawn_request", {
         "job_id": "parent-1",
         "tasks": [
-            {"goal": "child A", "role": "worker", "params": {"repo": "/r", "branch": "main"}},
-            {"goal": "child B", "role": "worker", "params": {"repo": "/r", "branch": "main"}},
+            {"goal": "child A", "role": "worker", "repo": "/r", "init_branch": "main"},
+            {"goal": "child B", "role": "worker", "repo": "/r", "init_branch": "main"},
         ],
         "wait_for": "all_complete",
     })
@@ -195,7 +195,7 @@ async def test_handle_spawn_creates_children_no_continuation():
     assert c0.job_id.startswith("parent-1-c")
     assert c1.job_id.startswith("parent-1-c")
     assert c0.job_id != c1.job_id
-    assert c0.task == "child A"
+    assert c0.goal == "child A"
     assert c0.role == "worker"
     assert c0.depends_on == frozenset()
     assert len(sup._pending) == 0
@@ -228,7 +228,7 @@ def test_spawn_handler_join_job_uses_continuation_instruction():
         "job_id": "parent-1",
         "task_id": "root-task",
         "tasks": [
-            {"goal": "child A", "role": "implementer", "params": {"repo": "/repo", "branch": "main"}},
+            {"goal": "child A", "role": "implementer", "repo": "/repo", "init_branch": "main"},
         ],
     })
 
@@ -236,7 +236,7 @@ def test_spawn_handler_join_job_uses_continuation_instruction():
     join_jobs = [job for job in plan.jobs if job.job_context.join is not None]
     assert len(join_jobs) == 1
     join_job = join_jobs[0]
-    assert "continuation planning step" in join_job.task
+    assert "continuation planning step" in join_job.goal
     assert join_job.role == "planner"
     # Per ADR-0007: role_params only has mode="join", parent_goal in JobContextConfig.join.parent_summary
     assert join_job.role_params["mode"] == "join"
@@ -287,8 +287,8 @@ async def test_handle_event_deduplicates_spawn_request():
     event = _evt("spawn-dup", "agent.job.spawn_request", {
         "job_id": "parent-1",
         "tasks": [
-            {"goal": "child A", "role": "worker", "params": {"repo": "/r", "branch": "main"}},
-            {"goal": "child B", "role": "worker", "params": {"repo": "/r", "branch": "main"}},
+            {"goal": "child A", "role": "worker", "repo": "/r", "init_branch": "main"},
+            {"goal": "child B", "role": "worker", "repo": "/r", "init_branch": "main"},
         ],
     })
 
@@ -320,7 +320,7 @@ async def test_handle_spawn_inherits_parent_defaults_for_missing_params_fields()
     await sup._handle_event(event, realtime=True)
 
     child = sup._ready_queue.get_nowait()
-    assert child.task == "child task"
+    assert child.goal == "child task"
     assert child.role == "worker"
     assert child.repo == "/parent-repo"
     assert child.init_branch == "parent-branch"
@@ -383,7 +383,7 @@ async def test_team_trigger_spawn_and_eval_flow():
             "team": "backend",
             "goal": "Plan backend refactor",
             "budget": 1.0,
-            "context": {"repo": "/repo", "init_branch": "main"},
+            "repo": "/repo", "init_branch": "main",
         },
     )
     await sup._handle_trigger(trigger)
@@ -403,7 +403,7 @@ async def test_team_trigger_spawn_and_eval_flow():
                     "goal": "Implement backend refactor",
                     "role": "implementer",
                     "budget": 0.6,
-                    "params": {"repo": "/repo", "branch": "main"},
+                    "repo": "/repo", "init_branch": "main",
                     "eval_spec": {
                         "deliverables": ["refactor complete"],
                         "criteria": ["tests pass"],
@@ -419,8 +419,8 @@ async def test_team_trigger_spawn_and_eval_flow():
     child_task_id = child_task_ids[0]
     child_job = next(job for job in sup.state.ready_queue_snapshot() if job.task_id == child_task_id)
     assert child_job.role == "implementer"
-    # Per ADR-0007: goal is SpawnedJob.task, budget is SpawnedJob.budget
-    assert child_job.task == "Implement backend refactor"
+    # Per ADR-0007: goal is SpawnedJob.goal, budget is SpawnedJob.budget
+    assert child_job.goal == "Implement backend refactor"
     assert child_job.budget == 0.6
 
     sup.state.jobs_by_id[child_job.job_id] = child_job
@@ -479,7 +479,7 @@ async def test_handle_event_marks_processed_only_after_success():
     event = _evt(
         "evt-retry",
         "trigger.external.received",
-        {"goal": "do X", "budget": 0.5, "context": {"role": "default"}},
+        {"goal": "do X", "budget": 0.5, "role": "default"},
     )
 
     original = sup._handle_trigger
@@ -930,7 +930,7 @@ async def test_checkpoint_reaps_timed_out_containers():
     from trenni.state import SpawnedJob, TaskRecord
     sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...")
     sup.state.jobs_by_id["j1"] = SpawnedJob(
-        job_id="j1", source_event_id="e1", task="t", role="default",
+        job_id="j1", source_event_id="e1", goal="t", role="default",
         repo="r", init_branch="b", evo_sha="s", task_id="t1"
     )
     handle = JobHandle(

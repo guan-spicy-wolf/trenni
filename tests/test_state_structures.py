@@ -42,7 +42,7 @@ def planner_role(**params):
         parent_job = SpawnedJob(
             job_id="parent-123",
             source_event_id="evt-1",
-            task="Parent task",
+            goal="Parent task",
             role="planner",
             repo="https://github.com/org/repo",
             init_branch="main",
@@ -103,7 +103,7 @@ def implementer_role(**params):
         parent_job = SpawnedJob(
             job_id="parent-123",
             source_event_id="evt-1",
-            task="Parent task",
+            goal="Parent task",
             role="implementer",
             repo="https://github.com/org/repo",
             init_branch="main",
@@ -139,7 +139,7 @@ def test_spawned_job_no_execution_overrides():
     job = SpawnedJob(
         job_id="test-123",
         source_event_id="evt-1",
-        task="Do something",
+        goal="Do something",
         role="implementer",
         repo="https://github.com/org/repo",
         init_branch="main",
@@ -177,7 +177,7 @@ def test_spawned_job_role_params_only_for_internal_flags():
     job = SpawnedJob(
         job_id="test-123",
         source_event_id="evt-1",
-        task="Do something",
+        goal="Do something",
         role="planner",
         repo="https://github.com/org/repo",
         init_branch="main",
@@ -217,7 +217,7 @@ def test_spawn_defaults_to_planner_when_role_unspecified():
     parent_job = SpawnedJob(
         job_id="parent-123",
         source_event_id="evt-1",
-        task="Parent task",
+        goal="Parent task",
         role="implementer",
         repo="https://github.com/org/repo",
         init_branch="main",

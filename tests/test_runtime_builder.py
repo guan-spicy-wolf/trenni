@@ -57,7 +57,7 @@ def test_runtime_spec_builder_uses_team_config():
     spec = builder.build(
         job_id="test-job-123",
         source_event_id="evt-456",
-        task="test-task",
+        goal="test-task",
         role="worker",
         team="factorio",
         repo="https://github.com/test/repo.git",
@@ -110,7 +110,7 @@ def test_runtime_spec_builder_team_missing_image_uses_default():
     spec = builder.build(
         job_id="test-job-789",
         source_event_id="evt-000",
-        task="test-task",
+        goal="test-task",
         role="worker",
         team="minimal",
         repo="https://github.com/test/repo.git",
@@ -156,7 +156,7 @@ def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
     spec = builder.build(
         job_id="test-job-nopod",
         source_event_id="evt-nopod",
-        task="test-task",
+        goal="test-task",
         role="worker",
         team="no-pod-team",
         repo="https://github.com/test/repo.git",
@@ -200,7 +200,7 @@ def test_runtime_spec_builder_unknown_team_uses_defaults():
     spec = builder.build(
         job_id="test-job-unknown",
         source_event_id="evt-unknown",
-        task="test-task",
+        goal="test-task",
         role="worker",
         team="unknown-team",
         repo="https://github.com/test/repo.git",

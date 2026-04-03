@@ -76,7 +76,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         spec = builder.build(
             job_id="test-job",
             source_event_id="event-123",
-            task="test-task",
+            goal="test-task",
             role="worker",
             repo="test/repo",
             init_branch="main",
@@ -100,7 +100,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         spec = builder.build(
             job_id="test-job",
             source_event_id="event-123",
-            task="test-task",
+            goal="test-task",
             role="worker",
             repo="test/repo",
             init_branch="main",
@@ -124,7 +124,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         spec = builder.build(
             job_id="test-job",
             source_event_id="event-123",
-            task="test-task",
+            goal="test-task",
             role="worker",
             repo="test/repo",
             init_branch="main",
@@ -143,7 +143,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         spec = builder.build(
             job_id="test-job",
             source_event_id="event-123",
-            task="test-task",
+            goal="test-task",
             role="worker",
             repo="test/repo",
             init_branch="main",
@@ -170,7 +170,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         spec = builder.build(
             job_id="test-job",
             source_event_id="event-123",
-            task="test-task",
+            goal="test-task",
             role="worker",
             repo="test/repo",
             init_branch="main",

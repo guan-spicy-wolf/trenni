@@ -86,7 +86,7 @@ def test_runtime_spec_builder_serializes_job_config(monkeypatch):
         job_id="job-1",
         task_id="task-1",
         source_event_id="evt-1",
-        task="do the thing",
+        goal="do the thing",
         role="default",
         repo="git@example.com/repo.git",
         init_branch="main",

@@ -39,7 +39,7 @@ class TestStrictTeamCapacityAtLaunch:
         job1 = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -49,7 +49,7 @@ class TestStrictTeamCapacityAtLaunch:
         job2 = SpawnedJob(
             job_id="job-2",
             source_event_id="event-2",
-            task="Task 2",
+            goal="Task 2",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -91,7 +91,7 @@ class TestStrictTeamCapacityAtLaunch:
         job = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -185,7 +185,7 @@ class TestDrainQueueTeamCapacity:
         job1 = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -195,7 +195,7 @@ class TestDrainQueueTeamCapacity:
         job2 = SpawnedJob(
             job_id="job-2",
             source_event_id="event-2",
-            task="Task 2",
+            goal="Task 2",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -265,7 +265,7 @@ class TestTeamCapacityWithPendingPromotion:
         job = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -293,7 +293,7 @@ class TestTeamCapacityWithPendingPromotion:
         job = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -320,7 +320,7 @@ class TestTeamCapacityWithPendingPromotion:
         job1 = SpawnedJob(
             job_id="job-1",
             source_event_id="event-1",
-            task="Task 1",
+            goal="Task 1",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -330,7 +330,7 @@ class TestTeamCapacityWithPendingPromotion:
         job2 = SpawnedJob(
             job_id="job-2",
             source_event_id="event-2",
-            task="Task 2",
+            goal="Task 2",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",
@@ -340,7 +340,7 @@ class TestTeamCapacityWithPendingPromotion:
         job3 = SpawnedJob(
             job_id="job-3",
             source_event_id="event-3",
-            task="Task 3",
+            goal="Task 3",
             role="worker",
             repo="https://example.com/repo",
             init_branch="main",

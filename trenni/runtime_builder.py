@@ -57,23 +57,17 @@ class RuntimeSpecBuilder:
         job_id: str,
         task_id: str | None = None,
         source_event_id: str,
-        task: str,
+        goal: str,
         role: str,
-        role_params: dict | None = None,  # only role-internal flags
+        role_params: dict | None = None,
         team: str = "default",
         repo: str,
         init_branch: str,
         evo_sha: str | None,
-        budget: float | None = None,  # NEW: single-channel budget per ADR-0007
+        budget: float | None = None,
         job_context: JobContextConfig | None = None,
     ) -> JobRuntimeSpec:
-        """Build JobRuntimeSpec from task semantics and role-derived defaults.
-
-        Per ADR-0007:
-        - Execution config (llm, workspace, publication) comes from TrenniConfig defaults.
-        - budget maps to llm.max_total_cost (single channel).
-        - No overrides from spawn payload.
-        """
+        """Build JobRuntimeSpec from task semantics and role-derived defaults."""
         # Workspace: use defaults + repo/init_branch from spawn
         merged_workspace = {
             **self.config.default_workspace,
@@ -94,7 +88,7 @@ class RuntimeSpecBuilder:
             {
                 "job_id": job_id,
                 "task_id": task_id or job_id,
-                "task": task,
+                "goal": goal,
                 "evo_sha": evo_sha or "",
                 "role": role,
                 "role_params": dict(role_params or {}),

@@ -19,13 +19,13 @@ def _queue_factory() -> asyncio.Queue["SpawnedJob"]:
 class SpawnedJob:
     """Job specification passed from spawn_handler to runtime_builder.
 
-    Per ADR-0007, this contains only task semantics and runtime identity.
+    Contains only task semantics and runtime identity.
     Execution config (llm, workspace, publication) is derived from role definition.
 
     Fields:
         job_id: Unique identifier assigned by Trenni.
         source_event_id: The spawn event that created this job.
-        task: The goal text (authoritative task description).
+        goal: The goal text (authoritative task description).
         role: Role type to execute this task.
         repo: Repository URL.
         init_branch: Starting branch.
@@ -38,20 +38,17 @@ class SpawnedJob:
         job_context: Join/eval context configuration.
         parent_job_id: Job ID of the spawning parent.
         team: Team that owns this task (inherited, not overridable).
-
-    Removed per ADR-0007:
-        llm_overrides, workspace_overrides, publication_overrides
     """
 
     job_id: str
     source_event_id: str
-    task: str
+    goal: str
     role: str
     repo: str
     init_branch: str
     evo_sha: str | None
-    budget: float = 0.0  # task semantics field per ADR-0007 Decision 1
-    role_params: dict[str, Any] = field(default_factory=dict)  # only role-internal flags
+    budget: float = 0.0
+    role_params: dict[str, Any] = field(default_factory=dict)
     depends_on: frozenset[str] = field(default_factory=frozenset)
     task_id: str = ""
     condition: Condition | None = None

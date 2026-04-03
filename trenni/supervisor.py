@@ -273,14 +273,14 @@ class Supervisor:
         await self._launch(
             job_id=job.job_id,
             task_id=job.task_id or job.job_id,
-            task=job.task,
+            goal=job.goal,
             role=job.role,
             role_params=job.role_params,
             team=job.team,
             repo=job.repo,
             init_branch=job.init_branch,
             evo_sha=job.evo_sha,
-            budget=job.budget,  # single-channel budget per ADR-0007
+            budget=job.budget,
             source_event_id=job.source_event_id,
             job_context=job.job_context,
             parent_job_id=job.parent_job_id,
@@ -338,20 +338,25 @@ class Supervisor:
         if event.id in self._launched_event_ids and not replay:
             return
 
-        data = TriggerData.model_validate(event.data)
+        try:
+            data = TriggerData.model_validate(event.data)
+        except Exception as e:
+            logger.warning("Invalid trigger event %s: %s", event.id, e)
+            return
+
         if not data.goal:
             logger.warning("Ignoring trigger event %s with no goal", event.id)
             return
 
         task_id = self._root_task_id(event.id)
         root_job_id = f"{task_id}-root"
-        team = str(data.team or data.context.get("team") or "default").strip() or "default"
+        team = str(data.team or "default").strip() or "default"
 
         self.scheduler.record_task_submission(
             task_id=task_id,
             goal=data.goal,
             source_event_id=event.id,
-            spec={**data.context, "team": team, "budget": data.budget},
+            spec={"team": team, "budget": data.budget, "role": data.role},
         )
         if task_id in self.state.tasks:
             self.state.tasks[task_id].team = team
@@ -372,31 +377,29 @@ class Supervisor:
                 ),
             )
 
-        # Context might define execution details, otherwise use defaults
+        # Use canonical fields from TriggerData
         team_def = self._resolve_team_definition(team)
-        role = data.context.get("role") or data.context.get("planner_role") or team_def.planner_role or "planner"
-        
-        # Per ADR-0007: role_params contains only role-internal flags (not goal/budget)
-        role_params = dict(data.context.get("params", {}))
+        role = data.role or team_def.planner_role or "planner"
+
+        # role_params contains only role-internal flags
+        role_params = dict(data.params)
         if role == team_def.planner_role:
             role_params.setdefault("mode", "initial")
-        # goal and budget NOT written to role_params
-        
-        repo = data.context.get("repo", "")
-        init_branch = data.context.get("init_branch", "main")
-        evo_sha = data.context.get("evo_sha")
-        # budget is a task semantics field per ADR-0007
+
+        repo = data.repo
+        init_branch = data.init_branch or "main"
+        evo_sha = data.sha
 
         root_job = SpawnedJob(
             job_id=root_job_id,
             source_event_id=event.id,
-            task=data.goal,
+            goal=data.goal,
             role=role,
             role_params=role_params,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
-            budget=data.budget,  # task semantics field per ADR-0007
+            budget=data.budget,
             task_id=task_id,
             team=team,
         )
@@ -481,16 +484,13 @@ class Supervisor:
                     job_id=job.job_id,
                     task_id=job.task_id or job.job_id,
                     source_event_id=job.source_event_id,
-                    task=job.task,
+                    goal=job.goal,
                     role=job.role,
                     role_params=dict(job.role_params),
                     team=job.team,
                     repo=job.repo,
                     init_branch=job.init_branch,
                     evo_sha=job.evo_sha or "",
-                    llm={},  # Per ADR-0007: execution config from role defaults
-                    workspace={},
-                    publication={},
                     parent_job_id=job.parent_job_id,
                     condition=condition_to_data(job.condition),
                     job_context=job.job_context.model_dump(mode="json"),
@@ -517,7 +517,7 @@ class Supervisor:
         job = SpawnedJob(
             job_id=data.job_id,
             source_event_id=data.source_event_id,
-            task=data.task,
+            goal=data.goal,
             role=data.role,
             role_params=dict(data.role_params),
             team=data.team,
@@ -934,12 +934,12 @@ class Supervisor:
     async def _launch(
         self,
         job_id: str,
-        task: str,
+        goal: str,
         role: str,
         repo: str,
         init_branch: str,
         evo_sha: str | None,
-        budget: float | None = None,  # task semantics field per ADR-0007
+        budget: float | None = None,
         source_event_id: str = "",
         task_id: str = "",
         job_context=None,
@@ -948,23 +948,19 @@ class Supervisor:
         team: str = "default",
         role_params: dict[str, Any] | None = None,
     ) -> None:
-        """Launch a job in the isolation backend.
-
-        Per ADR-0007: execution config comes from TrenniConfig defaults + role definition.
-        budget is passed from SpawnedJob.budget (task semantics field).
-        """
+        """Launch a job in the isolation backend."""
         spec = self.runtime_builder.build(
             job_id=job_id,
             task_id=task_id or job_id,
             source_event_id=source_event_id,
-            task=task,
+            goal=goal,
             role=role,
             role_params=role_params,
             team=team,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
-            budget=budget,  # single-channel budget per ADR-0007
+            budget=budget,
             job_context=job_context,
         )
 
@@ -982,14 +978,14 @@ class Supervisor:
         self.state.jobs_by_id[job_id] = SpawnedJob(
             job_id=job_id,
             source_event_id=source_event_id,
-            task=task,
+            goal=goal,
             role=role,
             role_params=dict(role_params or {}),
             team=team,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
-            budget=budget or 0.0,  # task semantics field
+            budget=budget or 0.0,
             task_id=task_id or job_id,
             condition=condition,
             job_context=job_context or self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).job_context,
@@ -1018,16 +1014,13 @@ class Supervisor:
             job_id=job_id,
             task_id=task_id or job_id,
             source_event_id=source_event_id,
-            task=task,
+            goal=goal,
             role=role,
             role_params=dict(role_params or {}),
             team=team,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha or "",
-            llm={},  # Per ADR-0007: observability shows resolved config, not deltas
-            workspace={},
-            publication={},
             runtime_kind=self.runtime_defaults.kind,
             container_id=handle.container_id,
             container_name=handle.container_name,
@@ -1468,13 +1461,13 @@ class Supervisor:
         self.state.jobs_by_id[job_id] = existing or SpawnedJob(
             job_id=job_id,
             source_event_id=source_event_id,
-            task=data.get("task", ""),
+            goal=data.get("goal", ""),
             role=data.get("role", "default"),
             team=data.get("team", "default"),
             repo=data.get("repo", ""),
             init_branch=data.get("init_branch", "main"),
             evo_sha=data.get("evo_sha") or None,
-            budget=0.0,  # budget not in launched event (derived from llm.max_total_cost)
+            budget=0.0,
             task_id=data.get("task_id", "") or job_id,
             condition=condition_from_data(data.get("condition")),
             parent_job_id=data.get("parent_job_id", ""),
@@ -1554,7 +1547,7 @@ class Supervisor:
         return SpawnedJob(
             job_id=eval_job_id,
             source_event_id=task.source_event_id,
-            task=self._eval_prompt(task.goal, eval_spec),
+            goal=self._eval_prompt(task.goal, eval_spec),
             role=role,
             role_params=eval_role_params,
             team=task.team,
