@@ -1007,14 +1007,12 @@ async def test_replay_enqueues_not_launched():
                 "job_id": "job-A",
                 "task_id": "t-1",
                 "source_event_id": "sub-1",
-                "task": "do X",
+                "goal": "do X",
                 "role": "default",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
-                "llm": {},
-                "workspace": {},
-                "publication": {},
+                "budget": 1.0,
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1040,14 +1038,14 @@ async def test_replay_skips_completed():
                 "job_id": "job-A",
                 "task_id": "t-1",
                 "source_event_id": "sub-1",
-                "task": "do X",
+                "goal": "do X",
                 "role": "default",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
-                "llm": {},
-                "workspace": {},
-                "publication": {},
+                "budget": 1.0,
+                
+                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1059,7 +1057,7 @@ async def test_replay_skips_completed():
             return [_evt("l1", "supervisor.job.launched", {
                 "source_event_id": "sub-1", "job_id": "job-A",
                 "container_id": "ctr-A", "container_name": "yoitsu-job-job-A",
-                "task_id": "t-1", "task": "do X", "role": "default", "repo": "/r"
+                "task_id": "t-1", "goal": "do X", "role": "default", "repo": "/r"
             })]
         if type_ == "agent.job.started":
             return [_evt("s1", "agent.job.started", {"job_id": "job-A"})]
@@ -1086,14 +1084,14 @@ async def test_replay_reenqueues_missing_container():
                 "job_id": "job-A",
                 "task_id": "t-1",
                 "source_event_id": "sub-1",
-                "task": "do X",
+                "goal": "do X",
                 "role": "default",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
-                "llm": {},
-                "workspace": {},
-                "publication": {},
+                "budget": 1.0,
+                
+                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1107,7 +1105,7 @@ async def test_replay_reenqueues_missing_container():
                 "job_id": "job-A",
                 "container_id": "ctr-A",
                 "container_name": "yoitsu-job-job-A",
-                "task_id": "t-1", "task": "do X", "role": "default", "repo": "/r"
+                "task_id": "t-1", "goal": "do X", "role": "default", "repo": "/r"
             })]
         return []
 
@@ -1130,14 +1128,14 @@ async def test_replay_reattaches_running_container():
                 "job_id": "job-A",
                 "task_id": "t-1",
                 "source_event_id": "sub-1",
-                "task": "do X",
+                "goal": "do X",
                 "role": "default",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
-                "llm": {},
-                "workspace": {},
-                "publication": {},
+                "budget": 1.0,
+                
+                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1151,7 +1149,7 @@ async def test_replay_reattaches_running_container():
                 "job_id": "job-A",
                 "container_id": "ctr-A",
                 "container_name": "yoitsu-job-job-A",
-                "task_id": "t-1", "task": "do X", "role": "default", "repo": "/r"
+                "task_id": "t-1", "goal": "do X", "role": "default", "repo": "/r"
             })]
         return []
 
