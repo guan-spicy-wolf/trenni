@@ -204,42 +204,17 @@ def test_spawn_defaults_role_params_only_for_internal_flags():
     assert defaults.role_params == {"mode": "join"}
 
 
-def test_spawn_defaults_to_planner_when_role_unspecified():
-    """Spawn without role defaults to planner (ADR-0008 D1)."""
-    from trenni.spawn_handler import SpawnHandler
-    from trenni.state import SupervisorState, SpawnedJob
+def test_spawn_requires_explicit_role():
+    """Spawn without role is rejected at validation (canonical contract)."""
     from yoitsu_contracts.events import SpawnRequestData
-    from types import SimpleNamespace
+    import pydantic
 
-    state = SupervisorState()
-    handler = SpawnHandler(state)  # No role_reader needed for this test
-
-    parent_job = SpawnedJob(
-        job_id="parent-123",
-        source_event_id="evt-1",
-        goal="Parent task",
-        role="implementer",
-        repo="https://github.com/org/repo",
-        init_branch="main",
-        evo_sha="abc123",
-        budget=1.0,
-        task_id="parent-task",
-        team="default",
-    )
-    state.jobs_by_id[parent_job.job_id] = parent_job
-    state.spawn_defaults_by_job[parent_job.job_id] = parent_job
-
-    # Spawn without specifying role
-    payload = SpawnRequestData(
-        job_id="parent-123",
-        tasks=[{
-            "goal": "Test task without role",
-            # No role specified - should default to planner
-        }]
-    )
-
-    event = SimpleNamespace(id="test-event", data=payload.model_dump())
-    plan = handler.expand(event)
-
-    assert len(plan.jobs) > 0
-    assert plan.jobs[0].role == "planner"  # Default role per ADR-0008 D1
+    # Spawn without role should fail validation
+    with pytest.raises(pydantic.ValidationError, match="role"):
+        SpawnRequestData(
+            job_id="parent-123",
+            tasks=[{
+                "goal": "Test task without role",
+                # No role specified - should fail
+            }]
+        )

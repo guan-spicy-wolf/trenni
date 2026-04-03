@@ -344,9 +344,7 @@ class Supervisor:
             logger.warning("Invalid trigger event %s: %s", event.id, e)
             return
 
-        if not data.goal:
-            logger.warning("Ignoring trigger event %s with no goal", event.id)
-            return
+        # goal is now required by pydantic (min_length=1), no need to check
 
         task_id = self._root_task_id(event.id)
         root_job_id = f"{task_id}-root"

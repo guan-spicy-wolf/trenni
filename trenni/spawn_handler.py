@@ -46,12 +46,14 @@ class SpawnHandler:
         for index, child in enumerate(payload.tasks):
             goal = child.goal.strip()
             if not goal:
+                # This should not happen due to pydantic min_length=1 validation
+                # but we keep this as a defensive check for whitespace-only goals
                 continue
 
             token = self._id_hash(f"{parent_task_id}:{event.id}:{index}")
             task_id = f"{parent_task_id}/{token}"
             job_id = f"{parent_job_id}-c{token}"
-            role = child.role or "planner"
+            role = child.role.strip()
 
             # role_params contains only role-internal flags
             role_params = dict(child.params)
