@@ -55,6 +55,19 @@ class PodmanBackend:
         if spec.extra_networks:
             payload["networks"] = list(spec.extra_networks)
 
+        # Mount volumes (e.g., evo directory)
+        if spec.volume_mounts:
+            payload["mounts"] = [
+                {
+                    "Type": "bind",
+                    "Source": host_path,
+                    "Destination": container_path,
+                    "RW": False,
+                    "Options": ["Z"],  # SELinux private label for container access
+                }
+                for host_path, container_path in spec.volume_mounts
+            ]
+
         response = await self._request("POST", "/libpod/containers/create", json=payload)
         data = response.json()
         return JobHandle(

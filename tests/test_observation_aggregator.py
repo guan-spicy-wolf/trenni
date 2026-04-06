@@ -108,7 +108,7 @@ async def test_aggregate_exceeds_threshold(sample_events):
         results, new_ids = await aggregate_observations(
             "http://localhost:8000",
             window_hours=24,
-            thresholds={"tool_repetition": 2.0},  # Threshold = 2, count = 2
+            thresholds={"tool_repetition": 2.0},
         )
     
     assert len(results) == 1
@@ -133,7 +133,6 @@ async def test_aggregate_multiple_metric_types(sample_events):
             thresholds={"tool_repetition": 1.0, "budget_variance": 0.3},
         )
     
-    # Should have both metric types
     assert len(results) == 2
     metrics = {r.metric_type: r for r in results}
     
@@ -174,7 +173,7 @@ async def test_aggregate_pagination():
     batch2 = [{"id": "evt-2", "type": "observation.tool_repetition", "ts": "2024-01-01T00:01:00Z", "data": {}}]
     
     call_count = 0
-    async def mock_get(url, params):
+    async def mock_get(url, params, headers=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -194,10 +193,9 @@ async def test_aggregate_pagination():
             thresholds={"tool_repetition": 1.0},
         )
     
-    # Should have aggregated both batches
     assert len(results) == 1
     assert results[0].count == 2
-    assert call_count == 2  # Two API calls made
+    assert call_count == 2
     assert set(new_ids) == {"evt-1", "evt-2"}
 
 
@@ -221,13 +219,11 @@ async def test_aggregate_filters_non_observation_events(sample_events):
             thresholds={"tool_repetition": 1.0, "budget_variance": 0.3},
         )
     
-    # Should only have observation events
     assert len(results) == 2
     metrics = {r.metric_type: r for r in results}
     assert "tool_repetition" in metrics
     assert "budget_variance" in metrics
     assert "tool.exec" not in metrics
-    # new_ids should only include observation.* event ids
     assert set(new_ids) == {"evt-1", "evt-2", "evt-3"}
 
 
@@ -247,7 +243,6 @@ def test_aggregation_result_dataclass():
     assert result.exceeded is True
     assert result.role == "worker"
     
-    # Test exceeded logic
     result2 = AggregationResult(
         metric_type="tool_repetition",
         count=3,
@@ -259,11 +254,7 @@ def test_aggregation_result_dataclass():
 
 @pytest.mark.asyncio
 async def test_aggregate_skips_processed_ids(sample_events):
-    """processed_ids only affects new_ids, NOT window count.
-    
-    Window count is ALL events in window (for threshold).
-    new_ids excludes already-processed IDs (for dedup).
-    """
+    """processed_ids only affects new_ids, NOT window count."""
     tool_repetition_events = [e for e in sample_events if e["type"] == "observation.tool_repetition"]
     
     mock_client = MagicMock()
@@ -271,7 +262,6 @@ async def test_aggregate_skips_processed_ids(sample_events):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     
-    # First call: process all events
     with patch("httpx.AsyncClient", return_value=mock_client):
         results1, new_ids1 = await aggregate_observations(
             "http://localhost:8000",
@@ -279,12 +269,9 @@ async def test_aggregate_skips_processed_ids(sample_events):
             thresholds={"tool_repetition": 2.0},
         )
     
-    # Window count = 2 (all events in window)
     assert results1[0].count == 2
-    # All IDs are new (no processed_ids provided)
     assert set(new_ids1) == {"evt-1", "evt-2"}
     
-    # Second call with processed_ids: window count unchanged, new_ids empty
     processed_ids = set(new_ids1)
     with patch("httpx.AsyncClient", return_value=mock_client):
         results2, new_ids2 = await aggregate_observations(
@@ -294,26 +281,15 @@ async def test_aggregate_skips_processed_ids(sample_events):
             processed_ids=processed_ids,
         )
     
-    # Window count is STILL 2 (processed_ids does NOT affect count)
-    # This is the key semantic: threshold uses window-wide total
     assert len(results2) == 1
-    assert results2[0].count == 2  # Window total, unchanged
-    assert results2[0].exceeded  # Threshold check uses window count
-    
-    # But new_ids is empty (all events already processed)
-    assert len(new_ids2) == 0  # No NEW IDs to spawn for
+    assert results2[0].count == 2
+    assert results2[0].exceeded
+    assert len(new_ids2) == 0
 
 
 @pytest.mark.asyncio
 async def test_aggregate_partial_processed_ids(sample_events):
-    """processed_ids only affects new_ids, window count includes ALL events.
-    
-    Scenario: 3 events in window (evt-1, evt-2, evt-3), evt-1 already processed.
-    Expected:
-    - count = 3 (window total, NOT affected by processed_ids)
-    - new_ids = [evt-2, evt-3] (only unprocessed IDs)
-    """
-    # Add third event
+    """processed_ids only affects new_ids, window count includes ALL events."""
     all_events = [e for e in sample_events if e["type"] == "observation.tool_repetition"]
     all_events.append({
         "id": "evt-3",
@@ -327,7 +303,6 @@ async def test_aggregate_partial_processed_ids(sample_events):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     
-    # Only evt-1 was processed before
     processed_ids = {"evt-1"}
     
     with patch("httpx.AsyncClient", return_value=mock_client):
@@ -338,26 +313,15 @@ async def test_aggregate_partial_processed_ids(sample_events):
             processed_ids=processed_ids,
         )
     
-    # Window count = 3 (ALL events in window, evt-1 NOT excluded from count)
     assert len(results) == 1
-    assert results[0].count == 3  # Window total: evt-1 + evt-2 + evt-3
-    assert results[0].exceeded  # 3 >= 2 threshold
-    
-    # new_ids = only unprocessed (evt-2, evt-3)
-    assert set(new_ids) == {"evt-2", "evt-3"}  # evt-1 excluded from new_ids only
+    assert results[0].count == 3
+    assert results[0].exceeded
+    assert set(new_ids) == {"evt-2", "evt-3"}
 
 
 @pytest.mark.asyncio
 async def test_window_count_semantics_for_threshold():
-    """Threshold uses window-wide total, not just 'new this round'.
-    
-    Critical scenario: threshold=5, events arrive in two rounds:
-    - Round 1: 3 events → count=3, not exceeded
-    - Round 2: 3 more events → count=6 (window total), exceeded
-    
-    This is the intended semantic for ADR-0010.
-    """
-    # Round 1: 3 events
+    """Threshold uses window-wide total, not just 'new this round'."""
     round1_events = [
         {"id": "evt-1", "type": "observation.tool_repetition", "ts": "2024-01-01T00:00:00Z", "data": {}},
         {"id": "evt-2", "type": "observation.tool_repetition", "ts": "2024-01-01T00:01:00Z", "data": {}},
@@ -376,12 +340,10 @@ async def test_window_count_semantics_for_threshold():
             thresholds={"tool_repetition": 5.0},
         )
     
-    # Round 1: count=3, threshold=5, not exceeded
     assert results1[0].count == 3
-    assert not results1[0].exceeded  # 3 < 5
+    assert not results1[0].exceeded
     assert set(new_ids1) == {"evt-1", "evt-2", "evt-3"}
     
-    # Round 2: 3 MORE events (window now has 6 total)
     round2_events = round1_events + [
         {"id": "evt-4", "type": "observation.tool_repetition", "ts": "2024-01-01T00:03:00Z", "data": {}},
         {"id": "evt-5", "type": "observation.tool_repetition", "ts": "2024-01-01T00:04:00Z", "data": {}},
@@ -389,7 +351,7 @@ async def test_window_count_semantics_for_threshold():
     ]
     
     mock_client.get = AsyncMock(return_value=make_response(round2_events))
-    processed_ids = set(new_ids1)  # evt-1, evt-2, evt-3 already processed
+    processed_ids = set(new_ids1)
     
     with patch("httpx.AsyncClient", return_value=mock_client):
         results2, new_ids2 = await aggregate_observations(
@@ -399,12 +361,6 @@ async def test_window_count_semantics_for_threshold():
             processed_ids=processed_ids,
         )
     
-    # Round 2: count=6 (WINDOW TOTAL, not just 3 new ones)
-    # This is the KEY semantic that triggers optimization when cumulative exceeds threshold
-    assert results2[0].count == 6  # Window total: 3 + 3
-    assert results2[0].exceeded  # 6 >= 5, NOW exceeded!
-    
-    # new_ids only has round 2 events (for dedup/spawn decision)
+    assert results2[0].count == 6
+    assert results2[0].exceeded
     assert set(new_ids2) == {"evt-4", "evt-5", "evt-6"}
-    
-    # Supervisor would spawn optimizer because: exceeded AND new_ids non-empty

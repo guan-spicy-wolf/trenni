@@ -1418,14 +1418,29 @@ class Supervisor:
 
         Per ADR-0007: budget is read from SpawnedJob.budget (task semantics field).
         Single channel, not role_params or llm_overrides.
+        
+        Fallback chain:
+        1. SpawnedJob.budget if > 0
+        2. Role's min_cost if role is resolvable
+        3. TrenniConfig.default_llm.max_total_cost
+        4. 0.0
         """
         # Primary: budget field on SpawnedJob (ADR-0007)
         if job.budget and job.budget > 0:
             return float(job.budget)
         
+        # Fallback: role's min_cost (when budget is 0 or unspecified)
+        try:
+            meta = self._resolve_role_metadata(job.role, team=job.team)
+            min_cost = float(meta.get("min_cost", 0.0) or 0.0)
+            if min_cost > 0:
+                return min_cost
+        except FileNotFoundError:
+            pass  # Role not resolvable yet
+        
         # Fallback: default from TrenniConfig
         default_budget = self.config.default_llm.get("max_total_cost")
-        if isinstance(default_budget, (int, float)):
+        if isinstance(default_budget, (int, float)) and default_budget > 0:
             return float(default_budget)
         return 0.0
 
@@ -1772,13 +1787,18 @@ class Supervisor:
            - New observation batch gets a new, independent job (won't reuse old job_id)
         """
         import hashlib
+        import os
         import time
         from .observation_aggregator import aggregate_observations, AggregationResult
+        
+        # Get API key from environment
+        api_key = os.environ.get(self.config.pasloe_api_key_env, "")
         
         results, new_ids = await aggregate_observations(
             self.config.pasloe_url,
             self.config.observation_window_hours,
             self.config.observation_thresholds,
+            api_key=api_key,
             processed_ids=self._processed_observation_ids_set,
         )
         

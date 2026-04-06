@@ -165,6 +165,14 @@ class RuntimeSpecBuilder:
 
         env.update(build_git_auth_env(self.defaults.git_token_env))
 
+        # Determine volume mounts
+        volume_mounts: list[tuple[str, str]] = []
+        
+        # Mount evo directory if evo_root is configured
+        # Use evo_root_host for the host path (required for volume mounts from within container)
+        if self.config.evo_root and self.config.evo_root_host:
+            volume_mounts.append((self.config.evo_root_host, "/opt/yoitsu/palimpsest/evo"))
+
         return JobRuntimeSpec(
             job_id=job_id,
             source_event_id=source_event_id,
@@ -178,4 +186,5 @@ class RuntimeSpecBuilder:
             command=("palimpsest", "container-entrypoint"),
             config_payload_b64=payload_b64,
             extra_networks=extra_networks,
+            volume_mounts=tuple(volume_mounts),
         )

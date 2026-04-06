@@ -108,6 +108,7 @@ class TrenniConfig:
     pasloe_api_key_env: str = "PASLOE_API_KEY"
     source_id: str = "trenni-supervisor"
     evo_root: str = ""
+    evo_root_host: str = ""  # Host path for volume mounts (when running in container)
 
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     teams: dict[str, TeamConfig] = field(default_factory=dict)

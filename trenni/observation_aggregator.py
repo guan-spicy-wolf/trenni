@@ -36,6 +36,7 @@ async def aggregate_observations(
     pasloe_url: str,
     window_hours: int,
     thresholds: dict[str, float],
+    api_key: str = "",
     processed_ids: set[str] | None = None,
 ) -> tuple[list[AggregationResult], list[str]]:
     """Query pasloe for observation.* events in window, aggregate by metric_type.
@@ -60,6 +61,7 @@ async def aggregate_observations(
         pasloe_url: Pasloe API base URL
         window_hours: How many hours back to query
         thresholds: Threshold dict (metric_type -> threshold value)
+        api_key: Pasloe API key for authentication
         processed_ids: Set of already-processed observation event IDs
         
     Returns:
@@ -72,13 +74,17 @@ async def aggregate_observations(
     all_event_ids: list[str] = []  # ALL IDs in window
     cursor = None
     
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    
     async with httpx.AsyncClient() as client:
         while True:
             params = {"since": cutoff.isoformat(), "limit": 1000, "order": "asc"}
             if cursor:
                 params["cursor"] = cursor
             
-            resp = await client.get(f"{pasloe_url}/events", params=params)
+            resp = await client.get(f"{pasloe_url}/events", params=params, headers=headers)
             resp.raise_for_status()
             batch = resp.json()
             
