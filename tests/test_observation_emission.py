@@ -78,7 +78,7 @@ class TestBudgetVarianceEmission:
             evo_sha="abc123",
             budget=5.0,
             task_id="task-001",
-            team="default",
+            bundle="default",
         )
         state.jobs_by_id[job_id] = job
         supervisor._spawn_defaults_by_job[job_id] = SpawnDefaults(
@@ -87,7 +87,7 @@ class TestBudgetVarianceEmission:
             role="planner",
             evo_sha="abc123",
             task_id="task-001",
-            team="default",
+            bundle="default",
             budget=5.0,
         )
 
@@ -168,7 +168,7 @@ class TestBudgetVarianceEmission:
             evo_sha="abc123",
             budget=0.0,  # No budget
             task_id="task-002",
-            team="default",
+            bundle="default",
         )
         state.jobs_by_id[job_id] = job
         supervisor._spawn_defaults_by_job[job_id] = SpawnDefaults(
@@ -177,7 +177,7 @@ class TestBudgetVarianceEmission:
             role="planner",
             evo_sha="abc123",
             task_id="task-002",
-            team="default",
+            bundle="default",
             budget=0.0,
         )
 

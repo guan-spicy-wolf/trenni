@@ -170,7 +170,7 @@ def test_trigger_data_input_artifacts_to_spawned_job():
         evo_sha=trigger.sha,
         budget=trigger.budget,
         task_id="test-task",
-        team=trigger.team,
+        bundle=trigger.bundle,
         input_artifacts=list(trigger.input_artifacts),
     )
 
@@ -212,7 +212,7 @@ def test_launched_event_replay_preserves_input_artifacts():
         source_event_id=event_data.get("source_event_id", ""),
         goal=event_data.get("goal", ""),
         role=event_data.get("role", "default"),
-        team=event_data.get("team", "default"),
+        bundle=event_data.get("bundle", ""),
         repo=event_data.get("repo", ""),
         init_branch=event_data.get("init_branch", "main"),
         evo_sha=event_data.get("evo_sha") or None,

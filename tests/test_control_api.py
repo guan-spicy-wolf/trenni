@@ -40,19 +40,19 @@ class TestStatus:
         assert "running_jobs" in data
 
     async def test_tasks_endpoint_returns_live_state(self, client, supervisor):
-        supervisor.state.tasks["t1"] = TaskRecord(task_id="t1", goal="ship", team="backend", state="running")
+        supervisor.state.tasks["t1"] = TaskRecord(task_id="t1", goal="ship", bundle="backend", state="running")
         r = await client.get("/control/tasks")
         assert r.status_code == 200
         assert r.json()[0]["task_id"] == "t1"
 
     async def test_task_detail_endpoint(self, client, supervisor):
-        supervisor.state.tasks["t1"] = TaskRecord(task_id="t1", goal="ship", team="backend", state="running")
+        supervisor.state.tasks["t1"] = TaskRecord(task_id="t1", goal="ship", bundle="backend", state="running")
         r = await client.get("/control/tasks/t1")
         assert r.status_code == 200
         assert r.json()["goal"] == "ship"
 
     async def test_task_detail_endpoint_accepts_hierarchical_task_id(self, client, supervisor):
-        supervisor.state.tasks["root/ab12"] = TaskRecord(task_id="root/ab12", goal="child", team="backend", state="running")
+        supervisor.state.tasks["root/ab12"] = TaskRecord(task_id="root/ab12", goal="ship", bundle="backend", state="running")
         r = await client.get("/control/tasks/root/ab12")
         assert r.status_code == 200
         assert r.json()["task_id"] == "root/ab12"

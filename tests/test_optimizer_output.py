@@ -47,7 +47,7 @@ class TestOptimizerOutputHandling:
             evo_sha="abc123",
             budget=0.5,
             task_id="task-opt",
-            team="default",
+            bundle="default",
         )
         supervisor.state.jobs_by_id[job_id] = job
 
@@ -66,6 +66,7 @@ class TestOptimizerOutputHandling:
             task_template=TaskTemplate(
                 goal="Adjust planner budget estimation",
                 role="implementer",
+                bundle="factorio",
                 budget=0.3,
             ),
         )
@@ -108,7 +109,7 @@ class TestOptimizerOutputHandling:
             evo_sha="abc123",
             budget=0.5,
             task_id="task-001",
-            team="default",
+            bundle="default",
         )
         supervisor.state.jobs_by_id[job_id] = job
 
@@ -149,7 +150,7 @@ class TestOptimizerOutputHandling:
             evo_sha="abc123",
             budget=0.5,
             task_id="task-opt",
-            team="default",
+            bundle="default",
         )
         supervisor.state.jobs_by_id[job_id] = job
 
@@ -189,7 +190,7 @@ class TestOptimizerOutputHandling:
             evo_sha="abc123",
             budget=0.5,
             task_id="task-opt",
-            team="default",
+            bundle="default",
         )
         supervisor.state.jobs_by_id[job_id] = job
 
@@ -229,7 +230,7 @@ class TestOptimizerOutputHandling:
             evo_sha="abc123",
             budget=0.5,
             task_id="task-opt",
-            team="default",
+            bundle="default",
         )
         supervisor.state.jobs_by_id[job_id] = job
 
@@ -253,6 +254,7 @@ Here is my proposal:
     "task_template": {
         "goal": "Adjust planner budget defaults",
         "role": "implementer",
+        "bundle": "factorio",
         "budget": 0.3
     }
 }
@@ -303,7 +305,7 @@ class TestReviewProposalTriggerConversion:
                 role="implementer",
                 budget=0.5,
                 repo="https://github.com/org/yoitsu",
-                team="backend",
+                bundle="backend",
             ),
         )
         trigger_data = review_proposal_to_trigger(proposal)
@@ -313,7 +315,7 @@ class TestReviewProposalTriggerConversion:
         assert data.role == "implementer"
         assert data.budget == 0.5
         assert data.repo == "https://github.com/org/yoitsu"
-        assert data.team == "backend"
+        assert data.bundle == "backend"
         assert data.params.get("source_review") is True
         assert len(data.params.get("evidence_summary", [])) == 1
 
@@ -348,7 +350,7 @@ class TestEndToEndOptimizationLoop:
             threshold=0.3,
             current_value=0.45,
             role="planner",
-            team="default",
+            bundle="default",
             budget=0.5,
             window_hours=24,
         )
@@ -397,7 +399,7 @@ class TestEndToEndOptimizationLoop:
                 goal="Adjust planner budget estimation parameters",
                 role="implementer",
                 budget=0.3,
-                team="default",
+                bundle="default",
             ),
         )
 
@@ -429,4 +431,4 @@ class TestEndToEndOptimizationLoop:
         # Verify the implementer task has correct goal
         implementer_job = implementer_jobs[0]
         assert "budget" in implementer_job.goal.lower()
-        assert implementer_job.team == "default"
+        assert implementer_job.bundle == "default"

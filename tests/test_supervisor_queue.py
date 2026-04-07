@@ -1,4 +1,7 @@
-"""Tests for Trenni supervisor: queueing, Podman launch, checkpoint, and replay."""
+"""Tests for Trenni supervisor: queueing, Podman launch, checkpoint, and replay.
+
+Per Bundle MVP: bundle and role are required fields in trigger events.
+"""
 import asyncio
 import re
 import time
@@ -59,7 +62,7 @@ async def test_handle_trigger_enqueues():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
     event = _evt("evt-abc", "trigger.external.received",
-                 {"goal": "do X", "budget": 0.5, "role": "default", "repo": "/r", "init_branch": "main"})
+                 {"goal": "do X", "budget": 0.5, "role": "default", "bundle": "factorio", "repo": "/r", "init_branch": "main"})
 
     await sup._handle_trigger(event)
 
@@ -67,79 +70,24 @@ async def test_handle_trigger_enqueues():
     job = sup._ready_queue.get_nowait()
     assert job.source_event_id == "evt-abc"
     assert job.goal == "do X"
+    assert job.bundle == "factorio"
     assert job.depends_on == frozenset()
-
-
-@pytest.mark.asyncio
-async def test_handle_trigger_with_team_defaults_to_planner_role():
-    sup = _make_supervisor()
-    sup.client.emit = AsyncMock()
-    sup._validate_spawned_job_budget = MagicMock(return_value=None)
-    sup._resolve_team_definition = MagicMock(
-        return_value=SimpleNamespace(
-            name="backend",
-            planner_role="custom-planner",
-            eval_role="custom-evaluator",
-            roles=["implementer"],
-        )
-    )
-    event = _evt("evt-team", "trigger.external.received", {"goal": "plan X", "team": "backend"})
-
-    await sup._handle_trigger(event)
-
-    job = sup._ready_queue.get_nowait()
-    assert job.role == "custom-planner"
-    assert job.team == "backend"
-    assert job.role_params["mode"] == "initial"
-
-
-@pytest.mark.asyncio
-async def test_handle_trigger_rejects_budget_below_role_min_cost():
-    sup = _make_supervisor()
-    emitted = []
-
-    async def fake_emit(type_, data, **kwargs):
-        emitted.append((type_, data))
-        return "evt-id"
-
-    sup.client.emit = fake_emit
-    sup._resolve_team_definition = MagicMock(
-        return_value=SimpleNamespace(
-            name="backend",
-            planner_role="planner",
-            eval_role="evaluator",
-            roles=["implementer"],
-        )
-    )
-    sup._resolve_role_metadata = MagicMock(return_value={"min_cost": 0.5})
-    event = _evt(
-        "evt-budget",
-        "trigger.external.received",
-        {"goal": "plan X", "team": "backend", "budget": 0.1},
-    )
-
-    await sup._handle_trigger(event)
-
-    assert sup._ready_queue.qsize() == 0
-    assert any(type_ == "supervisor.task.failed" for type_, _ in emitted)
-    assert sup.state.tasks[sup._root_task_id("evt-budget")].terminal_state == "failed"
 
 
 @pytest.mark.asyncio
 async def test_handle_trigger_budget_propagates_to_root_job():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    sup._validate_spawned_job_budget = MagicMock(return_value=None)
     event = _evt(
         "evt-root-budget",
         "trigger.external.received",
-        {"goal": "do X", "budget": 0.75, "role": "default", "repo": "/r", "init_branch": "main"},
+        {"goal": "do X", "budget": 0.75, "role": "default", "bundle": "factorio", "repo": "/r", "init_branch": "main"},
     )
 
     await sup._handle_trigger(event)
 
     job = sup._ready_queue.get_nowait()
-    # Per ADR-0007: budget is SpawnedJob.budget field, not in role_params or llm_overrides
+    # Per ADR-0007: budget is SpawnedJob.budget field
     assert job.budget == 0.75
 
 
@@ -149,7 +97,7 @@ async def test_handle_trigger_deduplicates():
     sup.client.emit = AsyncMock()
     sup._launched_event_ids.add("evt-dup")
     event = _evt("evt-dup", "trigger.external.received",
-                 {"goal": "do X", "role": "default"})
+                 {"goal": "do X", "role": "default", "bundle": "factorio"})
 
     await sup._handle_trigger(event)
     assert sup._ready_queue.qsize() == 0
@@ -159,7 +107,7 @@ async def test_handle_trigger_deduplicates():
 async def test_handle_trigger_ignores_empty_goal():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    event = _evt("evt-empty", "trigger.external.received", {"goal": "", "role": "default"})
+    event = _evt("evt-empty", "trigger.external.received", {"goal": "", "role": "default", "bundle": "factorio"})
 
     await sup._handle_trigger(event)
     assert sup._ready_queue.qsize() == 0
@@ -167,10 +115,35 @@ async def test_handle_trigger_ignores_empty_goal():
 
 
 @pytest.mark.asyncio
+async def test_handle_trigger_missing_bundle_rejected():
+    """Per Bundle MVP: trigger without bundle is rejected."""
+    sup = _make_supervisor()
+    sup.client.emit = AsyncMock()
+    event = _evt("evt-no-bundle", "trigger.external.received",
+                 {"goal": "do X", "role": "default"})
+
+    await sup._handle_trigger(event)
+
+    assert sup._ready_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_trigger_missing_role_rejected():
+    """Per Bundle MVP: trigger without role is rejected."""
+    sup = _make_supervisor()
+    sup.client.emit = AsyncMock()
+    event = _evt("evt-no-role", "trigger.external.received",
+                 {"goal": "do X", "bundle": "factorio"})
+
+    await sup._handle_trigger(event)
+
+    assert sup._ready_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
 async def test_handle_spawn_creates_children_no_continuation():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    sup._validate_spawned_job_budget = MagicMock(return_value=None)
     sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
         repo="/parent-repo",
         init_branch="main",
@@ -181,8 +154,8 @@ async def test_handle_spawn_creates_children_no_continuation():
     event = _evt("spawn-1", "agent.job.spawn_request", {
         "job_id": "parent-1",
         "tasks": [
-            {"goal": "child A", "role": "worker", "repo": "/r", "init_branch": "main"},
-            {"goal": "child B", "role": "worker", "repo": "/r", "init_branch": "main"},
+            {"goal": "child A", "role": "worker", "bundle": "factorio", "repo": "/r", "init_branch": "main"},
+            {"goal": "child B", "role": "worker", "bundle": "factorio", "repo": "/r", "init_branch": "main"},
         ],
         "wait_for": "all_complete",
     })
@@ -197,6 +170,7 @@ async def test_handle_spawn_creates_children_no_continuation():
     assert c0.job_id != c1.job_id
     assert c0.goal == "child A"
     assert c0.role == "worker"
+    assert c0.bundle == "factorio"
     assert c0.depends_on == frozenset()
     assert len(sup._pending) == 0
 
@@ -228,7 +202,7 @@ def test_spawn_handler_join_job_uses_continuation_instruction():
         "job_id": "parent-1",
         "task_id": "root-task",
         "tasks": [
-            {"goal": "child A", "role": "implementer", "repo": "/repo", "init_branch": "main"},
+            {"goal": "child A", "role": "implementer", "bundle": "factorio", "repo": "/repo", "init_branch": "main"},
         ],
     })
 
@@ -238,26 +212,24 @@ def test_spawn_handler_join_job_uses_continuation_instruction():
     join_job = join_jobs[0]
     assert "continuation planning step" in join_job.goal
     assert join_job.role == "planner"
-    # Per ADR-0007: role_params only has mode="join", parent_goal in JobContextConfig.join.parent_summary
+    # Per ADR-0007: role_params only has mode="join"
     assert join_job.role_params["mode"] == "join"
     assert join_job.job_context.join.parent_summary == "Parent goal"
 
 
 @pytest.mark.asyncio
-async def test_supervisor_start_validates_role_catalog_before_loop():
+async def test_supervisor_start_validates_before_loop():
     sup = _make_supervisor()
     sup.client.register_source = AsyncMock()
-    sup._validate_role_catalog = MagicMock(side_effect=ValueError("broken team"))
     sup._replay_unfinished_tasks = AsyncMock()
     sup._try_register_webhook = AsyncMock()
     sup._run_loop = AsyncMock()
     sup.client.close = AsyncMock()
     sup.backend.close = AsyncMock()
 
-    with pytest.raises(ValueError, match="broken team"):
-        await sup.start()
+    await sup.start()
 
-    sup._run_loop.assert_not_called()
+    sup._run_loop.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -276,7 +248,6 @@ async def test_handle_spawn_empty_tasks_ignored():
 async def test_handle_event_deduplicates_spawn_request():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    sup._validate_spawned_job_budget = MagicMock(return_value=None)
     sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
         repo="/parent-repo",
         init_branch="main",
@@ -287,8 +258,8 @@ async def test_handle_event_deduplicates_spawn_request():
     event = _evt("spawn-dup", "agent.job.spawn_request", {
         "job_id": "parent-1",
         "tasks": [
-            {"goal": "child A", "role": "worker", "repo": "/r", "init_branch": "main"},
-            {"goal": "child B", "role": "worker", "repo": "/r", "init_branch": "main"},
+            {"goal": "child A", "role": "worker", "bundle": "factorio", "repo": "/r", "init_branch": "main"},
+            {"goal": "child B", "role": "worker", "bundle": "factorio", "repo": "/r", "init_branch": "main"},
         ],
     })
 
@@ -302,7 +273,6 @@ async def test_handle_event_deduplicates_spawn_request():
 async def test_handle_spawn_inherits_parent_defaults_for_missing_params_fields():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    sup._validate_spawned_job_budget = MagicMock(return_value=None)
     sup._spawn_defaults_by_job["parent-1"] = SpawnDefaults(
         repo="/parent-repo",
         init_branch="parent-branch",
@@ -313,7 +283,7 @@ async def test_handle_spawn_inherits_parent_defaults_for_missing_params_fields()
     event = _evt("spawn-inherit", "agent.job.spawn_request", {
         "job_id": "parent-1",
         "tasks": [
-            {"goal": "child task", "role": "worker"},
+            {"goal": "child task", "role": "worker", "bundle": "factorio"},
         ],
     })
 
@@ -325,138 +295,9 @@ async def test_handle_spawn_inherits_parent_defaults_for_missing_params_fields()
     assert child.repo == "/parent-repo"
     assert child.init_branch == "parent-branch"
     assert child.evo_sha == "parent-sha"
-    assert child.team == "default"
+    assert child.bundle == "factorio"
     # Per ADR-0007: no execution config overrides inherited
     assert child.budget == 0.0
-
-
-def test_build_eval_job_uses_evaluator_role_and_git_ref_branch():
-    sup = _make_supervisor()
-    sup._resolve_team_definition = MagicMock(
-        return_value=SimpleNamespace(
-            name="backend",
-            planner_role="planner",
-            eval_role="custom-evaluator",
-            roles=["implementer"],
-        )
-    )
-    task = TaskRecord(task_id="t-1", goal="goal", team="backend")
-    task.job_order = ["j1"]
-    sup.state.tasks["t-1"] = task
-    sup.state.jobs_by_id["j1"] = SpawnedJob("j1", "e1", "goal", "implementer", "/repo", "main", None, task_id="t-1")
-    sup.state.job_git_refs["j1"] = "palimpsest/job/j1:deadbeef"
-
-    job = sup._build_eval_job(task, "t-1-eval")
-
-    assert job.role == "custom-evaluator"
-    assert job.team == "backend"
-    assert job.init_branch == "palimpsest/job/j1"
-    # Per ADR-0007: eval job uses role_params for eval-specific flags, not overrides
-    assert job.role_params.get("eval_mode") is True
-
-
-@pytest.mark.asyncio
-async def test_team_trigger_spawn_and_eval_flow():
-    sup = _make_supervisor()
-
-    emitted = []
-
-    async def fake_emit(type_, data, **kwargs):
-        emitted.append((type_, data))
-        return "evt-id"
-
-    sup.client.emit = fake_emit
-    sup._resolve_team_definition = MagicMock(
-        return_value=SimpleNamespace(
-            name="backend",
-            planner_role="planner",
-            eval_role="evaluator",
-            worker_roles=["implementer"],
-            roles=["planner", "implementer", "evaluator"],
-        )
-    )
-
-    trigger = _evt(
-        "evt-root",
-        "trigger.external.received",
-        {
-            "team": "backend",
-            "goal": "Plan backend refactor",
-            "budget": 1.0,
-            "repo": "/repo", "init_branch": "main",
-        },
-    )
-    await sup._handle_trigger(trigger)
-
-    planner_job = sup._ready_queue.get_nowait()
-    assert planner_job.role == "planner"
-    sup.state.jobs_by_id[planner_job.job_id] = planner_job
-
-    spawn_evt = _evt(
-        "evt-spawn",
-        "agent.job.spawn_request",
-        {
-            "job_id": planner_job.job_id,
-            "task_id": planner_job.task_id,
-            "tasks": [
-                {
-                    "goal": "Implement backend refactor",
-                    "role": "implementer",
-                    "budget": 0.6,
-                    "repo": "/repo", "init_branch": "main",
-                    "eval_spec": {
-                        "deliverables": ["refactor complete"],
-                        "criteria": ["tests pass"],
-                    },
-                }
-            ],
-        },
-    )
-    await sup._handle_spawn(spawn_evt)
-
-    child_task_ids = [task_id for task_id in sup.state.tasks if "/" in task_id]
-    assert len(child_task_ids) == 1
-    child_task_id = child_task_ids[0]
-    child_job = next(job for job in sup.state.ready_queue_snapshot() if job.task_id == child_task_id)
-    assert child_job.role == "implementer"
-    # Per ADR-0007: goal is SpawnedJob.goal, budget is SpawnedJob.budget
-    assert child_job.goal == "Implement backend refactor"
-    assert child_job.budget == 0.6
-
-    sup.state.jobs_by_id[child_job.job_id] = child_job
-    sup.state.drop_from_ready_queue(child_job.job_id)
-    await sup._handle_job_done(
-        _evt(
-            "evt-child-done",
-            "agent.job.completed",
-            {
-                "job_id": child_job.job_id,
-                "task_id": child_task_id,
-                "summary": "implemented",
-                "git_ref": "palimpsest/job/demo:deadbeef",
-            },
-        )
-    )
-
-    assert any(t == "supervisor.task.evaluating" for t, _ in emitted)
-    eval_job = next(job for job in sup.state.ready_queue_snapshot() if job.task_id == child_task_id and job.job_context.eval is not None)
-    assert eval_job.role == "evaluator"
-
-    sup.state.jobs_by_id[eval_job.job_id] = eval_job
-    await sup._handle_job_done(
-        _evt(
-            "evt-eval-done",
-            "agent.job.completed",
-            {
-                "job_id": eval_job.job_id,
-                "task_id": child_task_id,
-                "summary": '{"verdict":"pass","summary":"looks good","criteria_results":[]}',
-            },
-        )
-    )
-
-    terminal_events = [t for t, d in emitted if d.get("task_id") == child_task_id]
-    assert "supervisor.task.completed" in terminal_events
 
 
 @pytest.mark.asyncio
@@ -479,7 +320,7 @@ async def test_handle_event_marks_processed_only_after_success():
     event = _evt(
         "evt-retry",
         "trigger.external.received",
-        {"goal": "do X", "budget": 0.5, "role": "default"},
+        {"goal": "do X", "budget": 0.5, "role": "default", "bundle": "factorio"},
     )
 
     original = sup._handle_trigger
@@ -541,7 +382,7 @@ async def test_enqueue_emits_supervisor_job_enqueued():
         return "evt-id"
 
     sup.client.emit = fake_emit
-    job = SpawnedJob("j1", "e1", "task", "default", "/repo", "main", None, task_id="t1")
+    job = SpawnedJob("j1", "e1", "task", "default", "/repo", "main", None, task_id="t1", bundle="factorio")
 
     await sup._enqueue(job)
 
@@ -558,7 +399,7 @@ async def test_enqueue_emits_supervisor_job_enqueued():
 async def test_enqueue_immediate_goes_to_ready():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    job = SpawnedJob("j1", "e1", "t", "r", "/r", "main", None)
+    job = SpawnedJob("j1", "e1", "t", "r", "/r", "main", None, bundle="factorio")
     await sup._enqueue(job)
     assert sup._ready_queue.qsize() == 1
     assert "j1" not in sup._pending
@@ -569,7 +410,7 @@ async def test_enqueue_with_deps_goes_to_pending():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
     job = SpawnedJob("j1", "e1", "t", "r", "/r", "main", None,
-                     depends_on=frozenset({"dep-1"}))
+                     depends_on=frozenset({"dep-1"}), bundle="factorio")
     await sup._enqueue(job)
     assert sup._ready_queue.qsize() == 0
     assert "j1" in sup._pending
@@ -581,7 +422,7 @@ async def test_enqueue_with_satisfied_deps_goes_to_ready():
     sup.client.emit = AsyncMock()
     sup._completed_jobs.add("dep-1")
     job = SpawnedJob("j1", "e1", "t", "r", "/r", "main", None,
-                     depends_on=frozenset({"dep-1"}))
+                     depends_on=frozenset({"dep-1"}), bundle="factorio")
     await sup._enqueue(job)
     assert sup._ready_queue.qsize() == 1
     assert "j1" not in sup._pending
@@ -591,7 +432,7 @@ async def test_enqueue_with_satisfied_deps_goes_to_ready():
 async def test_handle_job_done_resolves_pending():
     sup = _make_supervisor()
     dep_job = SpawnedJob("p-join", "e1", "join task", "default", "/r", "main", None,
-                         depends_on=frozenset({"p-c0", "p-c1"}))
+                         depends_on=frozenset({"p-c0", "p-c1"}), bundle="factorio")
     sup._pending["p-join"] = dep_job
 
     await sup._handle_job_done(_evt("d1", "agent.job.completed", {
@@ -622,7 +463,7 @@ async def test_handle_job_failed_propagates_to_dependents():
 
     sup.client.emit = fake_emit
     dep_job = SpawnedJob("p-join", "e1", "join task", "default", "/r", "main", None,
-                         depends_on=frozenset({"p-c0", "p-c1"}))
+                         depends_on=frozenset({"p-c0", "p-c1"}), bundle="factorio")
     sup._pending["p-join"] = dep_job
 
     await sup._handle_job_done(_evt("d1", "agent.job.failed", {
@@ -654,8 +495,8 @@ async def test_handle_job_done_caches_summary():
 async def test_handle_job_budget_exhausted_emits_task_partial():
     sup = _make_supervisor()
     sup.client.emit = AsyncMock()
-    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="goal")
-    sup.state.jobs_by_id["j1"] = SpawnedJob("j1", "e1", "goal", "default", "/r", "main", None, task_id="t1")
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="goal", bundle="factorio")
+    sup.state.jobs_by_id["j1"] = SpawnedJob("j1", "e1", "goal", "default", "/r", "main", None, task_id="t1", bundle="factorio")
 
     await sup._handle_job_done(_evt("d1", "agent.job.completed", {
         "job_id": "j1",
@@ -688,7 +529,7 @@ async def test_handle_job_done_removes_from_jobs():
 @pytest.mark.asyncio
 async def test_drain_queue_launches_when_capacity():
     sup = _make_supervisor(max_workers=2)
-    job = SpawnedJob("job-1", "evt-1", "task", "default", "/repo", "main", None)
+    job = SpawnedJob("job-1", "evt-1", "task", "default", "/repo", "main", None, bundle="factorio")
     await sup._ready_queue.put(job)
 
     launched = []
@@ -714,7 +555,7 @@ async def test_drain_queue_waits_when_at_capacity():
     sup = _make_supervisor(max_workers=1)
 
     sup.jobs["existing"] = JobHandle("existing", "ctr-existing", "yoitsu-job-existing")
-    job = SpawnedJob("job-2", "evt-2", "task", "default", "/repo", "main", None)
+    job = SpawnedJob("job-2", "evt-2", "task", "default", "/repo", "main", None, bundle="factorio")
     await sup._ready_queue.put(job)
 
     launched = []
@@ -761,7 +602,7 @@ async def test_launch_emits_container_identity():
     sup.backend.start = AsyncMock()
 
     await sup._launch("job-xyz", "test", "default", "/repo", "main", None,
-                      source_event_id="evt-src-123")
+                      source_event_id="evt-src-123", bundle="factorio")
 
     assert emitted
     type_, data = emitted[0]
@@ -794,7 +635,7 @@ async def test_launch_removes_container_when_start_fails():
 
     with pytest.raises(RuntimeError):
         await sup._launch("job-xyz", "test", "default", "/repo", "main", None,
-                          source_event_id="evt-src-123")
+                          source_event_id="evt-src-123", bundle="factorio")
 
     sup.backend.remove.assert_awaited_once()
 
@@ -840,7 +681,7 @@ async def test_launch_calls_ensure_ready_before_prepare():
     sup.client.emit = AsyncMock()
 
     await sup._launch("job-xyz", "test", "default", "/repo", "main", None,
-                      source_event_id="evt-src-123")
+                      source_event_id="evt-src-123", bundle="factorio")
 
     # Verify call order: ensure_ready must be called before prepare
     assert call_order == ["ensure_ready", "prepare", "start"], \
@@ -887,7 +728,7 @@ async def test_launch_propagates_ensure_ready_errors():
 
     with pytest.raises(RuntimeError, match="missing-pod"):
         await sup._launch("job-xyz", "test", "default", "/repo", "main", None,
-                          source_event_id="evt-src-123")
+                          source_event_id="evt-src-123", bundle="factorio")
 
     # Verify prepare was never called due to ensure_ready failure
     assert not prepare_called, "prepare should not be called when ensure_ready fails"
@@ -927,11 +768,10 @@ async def test_checkpoint_reaps_timed_out_containers():
     sup.backend.stop = AsyncMock()
     sup.backend.remove = AsyncMock()
 
-    from trenni.state import SpawnedJob, TaskRecord
-    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...")
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...", bundle="factorio")
     sup.state.jobs_by_id["j1"] = SpawnedJob(
         job_id="j1", source_event_id="e1", goal="t", role="default",
-        repo="r", init_branch="b", evo_sha="s", task_id="t1"
+        repo="r", init_branch="b", evo_sha="s", task_id="t1", bundle="factorio"
     )
     handle = JobHandle(
         "j1",
@@ -967,7 +807,7 @@ async def test_checkpoint_emits_state():
 
     sup.client.emit = fake_emit
     sup.event_cursor = "2026-01-01T00:00:00|abc"
-    sup._pending["p1"] = SpawnedJob("p1", "e", "t", "r", "/r", "m", None)
+    sup._pending["p1"] = SpawnedJob("p1", "e", "t", "r", "/r", "m", None, bundle="factorio")
 
     await sup._checkpoint()
 
@@ -1009,6 +849,7 @@ async def test_replay_enqueues_not_launched():
                 "source_event_id": "sub-1",
                 "goal": "do X",
                 "role": "default",
+                "bundle": "factorio",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
@@ -1040,12 +881,11 @@ async def test_replay_skips_completed():
                 "source_event_id": "sub-1",
                 "goal": "do X",
                 "role": "default",
+                "bundle": "factorio",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
                 "budget": 1.0,
-                
-                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1086,12 +926,11 @@ async def test_replay_reenqueues_missing_container():
                 "source_event_id": "sub-1",
                 "goal": "do X",
                 "role": "default",
+                "bundle": "factorio",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
                 "budget": 1.0,
-                
-                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1130,12 +969,11 @@ async def test_replay_reattaches_running_container():
                 "source_event_id": "sub-1",
                 "goal": "do X",
                 "role": "default",
+                "bundle": "factorio",
                 "repo": "/r",
                 "init_branch": "main",
                 "evo_sha": "",
                 "budget": 1.0,
-                
-                
                 "parent_job_id": "",
                 "condition": None,
                 "job_context": {},
@@ -1226,7 +1064,7 @@ async def test_start_calls_runtime_ready_replay_and_drain():
 
 def test_status_reflects_unified_state():
     sup = _make_supervisor()
-    sup._pending["p1"] = SpawnedJob("p1", "e", "t", "r", "/r", "m", None)
+    sup._pending["p1"] = SpawnedJob("p1", "e", "t", "r", "/r", "m", None, bundle="factorio")
     st = sup.status
     assert st["pending_jobs"] == 1
     assert "ready_queue_size" in st

@@ -1,6 +1,6 @@
 """Tests for strict max_concurrent_jobs enforcement at launch time.
 
-Issue 5: Scheduler only checks running_jobs_by_team when enqueuing,
+Issue 5: Scheduler only checks running_jobs_by_bundle when enqueuing,
 not when actually launching. Multiple jobs from same team can enter
 ready queue in same poll cycle, and _drain_queue() launches without
 re-checking team capacity.
@@ -19,11 +19,11 @@ from trenni.scheduler import Scheduler
 from trenni.state import SupervisorState, SpawnedJob
 
 
-class TestStrictTeamCapacityAtLaunch:
+class TestStrictBundleCapacityAtLaunch:
     """Tests for team capacity re-check at launch time."""
 
     @pytest.mark.asyncio
-    async def test_multiple_ready_jobs_same_team_respects_capacity(self):
+    async def test_multiple_ready_jobs_same_bundle_respects_capacity(self):
         """Multiple jobs in ready queue for same team should respect capacity.
 
         Scenario:
@@ -44,7 +44,7 @@ class TestStrictTeamCapacityAtLaunch:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
         job2 = SpawnedJob(
             job_id="job-2",
@@ -54,7 +54,7 @@ class TestStrictTeamCapacityAtLaunch:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         # Manually add both to ready queue (simulating race condition)
@@ -70,16 +70,16 @@ class TestStrictTeamCapacityAtLaunch:
         # The other should be back in pending or still in ready queue
 
         # Check that scheduler knows team capacity is limited
-        assert scheduler.has_team_capacity("factorio") is True  # Initially has capacity
+        assert scheduler.has_bundle_capacity("factorio") is True  # Initially has capacity
 
         # Simulate first job "running"
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
 
         # Now team is at capacity
-        assert scheduler.has_team_capacity("factorio") is False
+        assert scheduler.has_bundle_capacity("factorio") is False
 
     @pytest.mark.asyncio
-    async def test_scheduler_can_check_and_launch_with_team_capacity(self):
+    async def test_scheduler_can_check_and_launch_with_bundle_capacity(self):
         """Scheduler provides method to safely launch with team capacity check.
 
         This tests the mechanism that _drain_queue should use.
@@ -96,17 +96,17 @@ class TestStrictTeamCapacityAtLaunch:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         # Team has capacity initially
-        assert scheduler.has_team_capacity("factorio") is True
+        assert scheduler.has_bundle_capacity("factorio") is True
 
         # Simulate acquiring team slot
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
 
         # Now team is at capacity
-        assert scheduler.has_team_capacity("factorio") is False
+        assert scheduler.has_bundle_capacity("factorio") is False
 
         # If job was in pending, resolve_pending should keep it there
         state.pending_jobs["job-1"] = job
@@ -119,8 +119,8 @@ class TestStrictTeamCapacityAtLaunch:
 class TestReplayTeamCounts:
     """Tests for rebuilding team running counts after restart."""
 
-    def test_replay_team_counts_from_running_jobs(self):
-        """replay_team_counts() rebuilds counts from running jobs list."""
+    def test_replay_bundle_counts_from_running_jobs(self):
+        """replay_bundle_counts() rebuilds counts from running jobs list."""
         state = SupervisorState()
 
         # Simulate 3 running jobs for factorio, 2 for default
@@ -132,45 +132,45 @@ class TestReplayTeamCounts:
             ("job-5", "default"),
         ]
 
-        # Call replay_team_counts (to be implemented)
-        state.replay_team_counts(running_jobs)
+        # Call replay_bundle_counts (to be implemented)
+        state.replay_bundle_counts(running_jobs)
 
-        assert state.running_count_for_team("factorio") == 3
-        assert state.running_count_for_team("default") == 2
-        assert state.running_count_for_team("other") == 0  # Unknown team
+        assert state.running_count_for_bundle("factorio") == 3
+        assert state.running_count_for_bundle("default") == 2
+        assert state.running_count_for_bundle("other") == 0  # Unknown team
 
-    def test_replay_team_counts_empty_list(self):
-        """replay_team_counts() handles empty running jobs list."""
+    def test_replay_bundle_counts_empty_list(self):
+        """replay_bundle_counts() handles empty running jobs list."""
         state = SupervisorState()
 
-        state.replay_team_counts([])
+        state.replay_bundle_counts([])
 
-        assert state.running_count_for_team("any-team") == 0
+        assert state.running_count_for_bundle("any-team") == 0
 
-    def test_replay_team_counts_preserves_existing(self):
-        """replay_team_counts() adds to existing counts, doesn't reset."""
+    def test_replay_bundle_counts_preserves_existing(self):
+        """replay_bundle_counts() adds to existing counts, doesn't reset."""
         state = SupervisorState()
 
         # Pre-existing count
-        state.increment_team_running("factorio")
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
+        state.increment_bundle_running("factorio")
 
         # Replay additional jobs
-        state.replay_team_counts([
+        state.replay_bundle_counts([
             ("job-1", "factorio"),
             ("job-2", "default"),
         ])
 
         # Should have 3 total for factorio (2 existing + 1 replayed)
-        assert state.running_count_for_team("factorio") == 3
-        assert state.running_count_for_team("default") == 1
+        assert state.running_count_for_bundle("factorio") == 3
+        assert state.running_count_for_bundle("default") == 1
 
 
-class TestDrainQueueTeamCapacity:
+class TestDrainQueueBundleCapacity:
     """Tests for _drain_queue behavior with team capacity enforcement."""
 
     @pytest.mark.asyncio
-    async def test_drain_queue_respects_team_capacity_on_launch(self):
+    async def test_drain_queue_respects_bundle_capacity_on_launch(self):
         """_drain_queue should re-check team capacity before each launch.
 
         This is a more integrated test that simulates the actual drain behavior.
@@ -190,7 +190,7 @@ class TestDrainQueueTeamCapacity:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
         job2 = SpawnedJob(
             job_id="job-2",
@@ -200,7 +200,7 @@ class TestDrainQueueTeamCapacity:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         await state.ready_queue.put(job1)
@@ -215,48 +215,48 @@ class TestDrainQueueTeamCapacity:
         assert initial_ready == 2
 
         # Team should have capacity for first job
-        assert scheduler.has_team_capacity("factorio") is True
+        assert scheduler.has_bundle_capacity("factorio") is True
 
 
-class TestJobCompletionFreesTeamCapacity:
+class TestJobCompletionFreesBundleCapacity:
     """Tests for team capacity being freed when jobs complete."""
 
-    def test_decrement_team_running_on_completion(self):
+    def test_decrement_bundle_running_on_completion(self):
         """When a job completes, team running count should decrement."""
         state = SupervisorState()
 
         # Start 2 jobs for factorio
-        state.increment_team_running("factorio")
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
+        state.increment_bundle_running("factorio")
 
-        assert state.running_count_for_team("factorio") == 2
+        assert state.running_count_for_bundle("factorio") == 2
 
         # Complete one
-        state.decrement_team_running("factorio")
+        state.decrement_bundle_running("factorio")
 
-        assert state.running_count_for_team("factorio") == 1
+        assert state.running_count_for_bundle("factorio") == 1
 
         # Complete another
-        state.decrement_team_running("factorio")
+        state.decrement_bundle_running("factorio")
 
-        assert state.running_count_for_team("factorio") == 0
+        assert state.running_count_for_bundle("factorio") == 0
 
     def test_decrement_does_not_go_negative(self):
-        """decrement_team_running should not go below 0."""
+        """decrement_bundle_running should not go below 0."""
         state = SupervisorState()
 
         # Decrement without any running jobs
-        state.decrement_team_running("factorio")
-        state.decrement_team_running("factorio")
+        state.decrement_bundle_running("factorio")
+        state.decrement_bundle_running("factorio")
 
-        assert state.running_count_for_team("factorio") == 0
+        assert state.running_count_for_bundle("factorio") == 0
 
 
-class TestTeamCapacityWithPendingPromotion:
+class TestBundleCapacityWithPendingPromotion:
     """Tests for pending jobs being promoted only when team has capacity."""
 
     @pytest.mark.asyncio
-    async def test_pending_job_promoted_when_team_has_capacity(self):
+    async def test_pending_job_promoted_when_bundle_has_capacity(self):
         """Pending job should be promoted to ready when team has capacity."""
         state = SupervisorState()
         teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2))}
@@ -270,12 +270,12 @@ class TestTeamCapacityWithPendingPromotion:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         # Job in pending, team has capacity (1 running, max 2)
         state.pending_jobs["job-1"] = job
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
 
         ready, cancelled = await scheduler._resolve_pending()
 
@@ -284,7 +284,7 @@ class TestTeamCapacityWithPendingPromotion:
         assert "job-1" not in state.pending_jobs
 
     @pytest.mark.asyncio
-    async def test_pending_job_stays_pending_when_team_at_capacity(self):
+    async def test_pending_job_stays_pending_when_bundle_at_capacity(self):
         """Pending job should stay pending when team is at capacity."""
         state = SupervisorState()
         teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
@@ -298,12 +298,12 @@ class TestTeamCapacityWithPendingPromotion:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         # Job in pending, team at capacity
         state.pending_jobs["job-1"] = job
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
 
         ready, cancelled = await scheduler._resolve_pending()
 
@@ -325,7 +325,7 @@ class TestTeamCapacityWithPendingPromotion:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
         job2 = SpawnedJob(
             job_id="job-2",
@@ -335,7 +335,7 @@ class TestTeamCapacityWithPendingPromotion:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
         job3 = SpawnedJob(
             job_id="job-3",
@@ -345,14 +345,14 @@ class TestTeamCapacityWithPendingPromotion:
             repo="https://example.com/repo",
             init_branch="main",
             evo_sha=None,
-            team="factorio",
+            bundle="factorio",
         )
 
         # All three jobs pending, team has 1 running (max 2)
         state.pending_jobs["job-1"] = job1
         state.pending_jobs["job-2"] = job2
         state.pending_jobs["job-3"] = job3
-        state.increment_team_running("factorio")  # 1 running, can promote 1 more
+        state.increment_bundle_running("factorio")  # 1 running, can promote 1 more
 
         ready, cancelled = await scheduler._resolve_pending()
 

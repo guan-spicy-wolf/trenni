@@ -28,7 +28,7 @@ class TestObservationThresholdEventHandling:
             threshold=0.3,
             current_value=0.45,
             role="planner",
-            team="default",
+            bundle="default",
             budget=0.5,
             window_hours=24,
         )
@@ -58,14 +58,14 @@ class TestObservationThresholdEventHandling:
             metric_type="preparation_failure",
             threshold=0.1,
             current_value=0.15,
-            team="backend",
+            bundle="backend",
             budget=0.4,
         )
         trigger = observation_threshold_to_trigger(event)
         # Validate as TriggerData
         data = TriggerData.model_validate(trigger)
         assert data.role == "optimizer"
-        assert data.team == "backend"
+        assert data.bundle == "backend"
         assert data.budget == 0.4
         assert "preparation_failure" in data.goal
 

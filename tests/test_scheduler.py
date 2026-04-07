@@ -34,7 +34,7 @@ def test_scheduler_teams_defaults_to_empty_dict():
     assert scheduler.bundles == {}
 
 
-def test_scheduler_has_team_capacity_for_unlimited_team():
+def test_scheduler_has_bundle_capacity_for_unlimited_team():
     """Scheduler allows launch when team has max_concurrent_jobs=0 (unlimited)."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
@@ -47,12 +47,12 @@ def test_scheduler_has_team_capacity_for_unlimited_team():
 
     # Team has 5 running jobs but max_concurrent=0 (unlimited)
     for _ in range(5):
-        state.increment_team_running("factorio")
+        state.increment_bundle_running("factorio")
 
-    assert scheduler.has_team_capacity("factorio") is True
+    assert scheduler.has_bundle_capacity("factorio") is True
 
 
-def test_scheduler_has_team_capacity_when_below_limit():
+def test_scheduler_has_bundle_capacity_when_below_limit():
     """Scheduler allows launch when team running count is below max."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
@@ -64,13 +64,13 @@ def test_scheduler_has_team_capacity_when_below_limit():
     scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # 2 running, max 3 -> has capacity
-    state.increment_team_running("factorio")
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
+    state.increment_bundle_running("factorio")
 
-    assert scheduler.has_team_capacity("factorio") is True
+    assert scheduler.has_bundle_capacity("factorio") is True
 
 
-def test_scheduler_has_team_capacity_when_at_limit():
+def test_scheduler_has_bundle_capacity_when_at_limit():
     """Scheduler denies launch when team running count equals max."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
@@ -82,13 +82,13 @@ def test_scheduler_has_team_capacity_when_at_limit():
     scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # 2 running, max 2 -> no capacity
-    state.increment_team_running("factorio")
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
+    state.increment_bundle_running("factorio")
 
-    assert scheduler.has_team_capacity("factorio") is False
+    assert scheduler.has_bundle_capacity("factorio") is False
 
 
-def test_scheduler_has_team_capacity_for_unknown_team():
+def test_scheduler_has_bundle_capacity_for_unknown_team():
     """Scheduler allows launch for team not in config (no limit set)."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
@@ -97,10 +97,10 @@ def test_scheduler_has_team_capacity_for_unknown_team():
     scheduler = Scheduler(state, max_workers=10, bundles={})
 
     # Unknown team has no limit
-    assert scheduler.has_team_capacity("unknown-team") is True
+    assert scheduler.has_bundle_capacity("unknown-team") is True
 
 
-def test_scheduler_has_team_capacity_independent_per_team():
+def test_scheduler_has_bundle_capacity_independent_per_team():
     """Team capacity checks are independent per team."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
@@ -115,16 +115,16 @@ def test_scheduler_has_team_capacity_independent_per_team():
     scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Both teams at capacity
-    state.increment_team_running("factorio")
-    state.increment_team_running("default")
-    state.increment_team_running("default")
+    state.increment_bundle_running("factorio")
+    state.increment_bundle_running("default")
+    state.increment_bundle_running("default")
 
-    assert scheduler.has_team_capacity("factorio") is False  # 1/1
-    assert scheduler.has_team_capacity("default") is False  # 2/2
-    assert scheduler.has_team_capacity("other") is True  # not configured
+    assert scheduler.has_bundle_capacity("factorio") is False  # 1/1
+    assert scheduler.has_bundle_capacity("default") is False  # 2/2
+    assert scheduler.has_bundle_capacity("other") is True  # not configured
 
 
-def test_scheduler_enqueue_checks_team_capacity():
+def test_scheduler_enqueue_checks_bundle_capacity():
     """enqueue() checks team capacity before moving to ready queue."""
     import asyncio
     from trenni.scheduler import Scheduler
@@ -145,7 +145,7 @@ def test_scheduler_enqueue_checks_team_capacity():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="factorio",
+        bundle="factorio",
     )
 
     cancelled = asyncio.run(scheduler.enqueue(job1))
@@ -154,7 +154,7 @@ def test_scheduler_enqueue_checks_team_capacity():
 
     # Simulate first job running
     state.running_jobs["job-1"] = None  # type: ignore
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
 
     # Second job for same team should stay in pending (not ready)
     job2 = SpawnedJob(
@@ -165,7 +165,7 @@ def test_scheduler_enqueue_checks_team_capacity():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="factorio",
+        bundle="factorio",
     )
 
     cancelled = asyncio.run(scheduler.enqueue(job2))
@@ -174,7 +174,7 @@ def test_scheduler_enqueue_checks_team_capacity():
     assert "job-2" in state.pending_jobs  # job-2 is pending, not ready
 
 
-def test_scheduler_enqueue_different_teams_independent():
+def test_scheduler_enqueue_different_bundles_independent():
     """enqueue() treats different teams independently for capacity."""
     import asyncio
     from trenni.scheduler import Scheduler
@@ -198,11 +198,11 @@ def test_scheduler_enqueue_different_teams_independent():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="factorio",
+        bundle="factorio",
     )
     asyncio.run(scheduler.enqueue(job1))
     state.running_jobs["job-1"] = None  # type: ignore
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
 
     # Default team job should still be ready (different team)
     job2 = SpawnedJob(
@@ -213,7 +213,7 @@ def test_scheduler_enqueue_different_teams_independent():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="default",
+        bundle="default",
     )
 
     cancelled = asyncio.run(scheduler.enqueue(job2))
@@ -221,7 +221,7 @@ def test_scheduler_enqueue_different_teams_independent():
     assert state.ready_queue.qsize() == 2  # Both jobs ready
 
 
-def test_scheduler_resolve_pending_respects_team_capacity():
+def test_scheduler_resolve_pending_respects_bundle_capacity():
     """_resolve_pending checks team capacity when promoting jobs."""
     import asyncio
     from trenni.scheduler import Scheduler
@@ -242,12 +242,12 @@ def test_scheduler_resolve_pending_respects_team_capacity():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="factorio",
+        bundle="factorio",
     )
     state.pending_jobs["job-1"] = job
 
     # Team is at capacity
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
 
     # Resolve pending - job should NOT move to ready
     ready, cancelled = asyncio.run(scheduler._resolve_pending())
@@ -257,7 +257,7 @@ def test_scheduler_resolve_pending_respects_team_capacity():
     assert "job-1" in state.pending_jobs  # Still pending
 
 
-def test_scheduler_resolve_pending_promotes_when_team_has_capacity():
+def test_scheduler_resolve_pending_promotes_when_bundle_has_capacity():
     """_resolve_pending promotes jobs when team has capacity."""
     import asyncio
     from trenni.scheduler import Scheduler
@@ -278,12 +278,12 @@ def test_scheduler_resolve_pending_promotes_when_team_has_capacity():
         repo="https://example.com/repo",
         init_branch="main",
         evo_sha=None,
-        team="factorio",
+        bundle="factorio",
     )
     state.pending_jobs["job-1"] = job
 
     # Team has capacity (1 running, max 2)
-    state.increment_team_running("factorio")
+    state.increment_bundle_running("factorio")
 
     # Resolve pending - job should move to ready
     ready, cancelled = asyncio.run(scheduler._resolve_pending())

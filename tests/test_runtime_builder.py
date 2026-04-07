@@ -7,7 +7,7 @@ from trenni.runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
 from trenni.runtime_types import RuntimeDefaults
 
 
-def test_runtime_spec_builder_uses_team_config():
+def test_runtime_spec_builder_uses_bundle_config():
     """RuntimeSpecBuilder selects runtime profile from team config.
 
     Per ADR-0011 D4:
@@ -59,7 +59,7 @@ def test_runtime_spec_builder_uses_team_config():
         source_event_id="evt-456",
         goal="test-task",
         role="worker",
-        team="factorio",
+        bundle="factorio",
         repo="https://github.com/test/repo.git",
         init_branch="main",
         evo_sha=None,
@@ -76,7 +76,7 @@ def test_runtime_spec_builder_uses_team_config():
     # We'll verify the method was called correctly by checking the spec construction
 
 
-def test_runtime_spec_builder_team_missing_image_uses_default():
+def test_runtime_spec_builder_bundle_missing_image_uses_default():
     """When team has no image override, use default image."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
@@ -112,7 +112,7 @@ def test_runtime_spec_builder_team_missing_image_uses_default():
         source_event_id="evt-000",
         goal="test-task",
         role="worker",
-        team="minimal",
+        bundle="minimal",
         repo="https://github.com/test/repo.git",
         init_branch="main",
         evo_sha=None,
@@ -123,7 +123,7 @@ def test_runtime_spec_builder_team_missing_image_uses_default():
     assert spec.pod_name == "minimal-pod", "Should use team pod_name when set"
 
 
-def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
+def test_runtime_spec_builder_bundle_none_pod_name_means_no_pod():
     """When team explicitly sets pod_name to None, job should have no pod."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
@@ -158,7 +158,7 @@ def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
         source_event_id="evt-nopod",
         goal="test-task",
         role="worker",
-        team="no-pod-team",
+        bundle="no-pod-team",
         repo="https://github.com/test/repo.git",
         init_branch="main",
         evo_sha=None,
@@ -168,7 +168,7 @@ def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
     assert spec.pod_name is None, "Team pod_name=None should result in no pod"
 
 
-def test_runtime_spec_builder_unknown_team_uses_defaults():
+def test_runtime_spec_builder_unknown_bundle_uses_defaults():
     """When team is not in config, use all defaults."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
@@ -202,7 +202,7 @@ def test_runtime_spec_builder_unknown_team_uses_defaults():
         source_event_id="evt-unknown",
         goal="test-task",
         role="worker",
-        team="unknown-team",
+        bundle="unknown-team",
         repo="https://github.com/test/repo.git",
         init_branch="main",
         evo_sha=None,

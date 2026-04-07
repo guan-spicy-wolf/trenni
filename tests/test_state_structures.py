@@ -9,8 +9,12 @@ import tempfile
 from pathlib import Path
 
 
+@pytest.mark.skip(reason="Budget validation disabled per Bundle MVP")
 def test_spawn_handler_rejects_budget_above_max_cost():
-    """Spawn is rejected if budget exceeds role's max_cost (ADR-0004 D1a)."""
+    """Spawn is rejected if budget exceeds role's max_cost (ADR-0004 D1a).
+    
+    Note: Budget validation is disabled per Bundle MVP.
+    """
     from trenni.spawn_handler import SpawnHandler
     from trenni.state import SupervisorState, SpawnedJob
     from yoitsu_contracts.role_metadata import RoleMetadataReader
@@ -49,7 +53,7 @@ def planner_role(**params):
             evo_sha="abc123",
             budget=1.0,
             task_id="parent-task",
-            team="default",
+            bundle="default",
         )
         state.jobs_by_id[parent_job.job_id] = parent_job
         state.spawn_defaults_by_job[parent_job.job_id] = parent_job
@@ -110,7 +114,7 @@ def implementer_role(**params):
             evo_sha="abc123",
             budget=1.0,
             task_id="parent-task",
-            team="default",
+            bundle="default",
         )
         state.jobs_by_id[parent_job.job_id] = parent_job
         state.spawn_defaults_by_job[parent_job.job_id] = parent_job
@@ -145,7 +149,7 @@ def test_spawned_job_no_execution_overrides():
         init_branch="main",
         evo_sha="abc123",
         task_id="task-1",
-        team="default",
+        bundle="default",
     )
     # These fields should not exist or should be empty dicts
     # After ADR-0007, they are removed entirely
@@ -163,7 +167,7 @@ def test_spawn_defaults_no_execution_overrides():
         init_branch="main",
         role="implementer",
         evo_sha="abc123",
-        team="default",
+        bundle="default",
     )
     assert not hasattr(defaults, "llm_overrides")
     assert not hasattr(defaults, "workspace_overrides")
@@ -199,7 +203,7 @@ def test_spawn_defaults_role_params_only_for_internal_flags():
         role="planner",
         evo_sha="abc123",
         role_params={"mode": "join"},  # role-internal flag
-        team="default",
+        bundle="default",
     )
     assert defaults.role_params == {"mode": "join"}
 
