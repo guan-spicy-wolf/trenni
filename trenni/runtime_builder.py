@@ -8,7 +8,7 @@ from yoitsu_contracts.artifact import ArtifactBinding
 from yoitsu_contracts.config import EventStoreConfig, JobConfig, JobContextConfig
 from yoitsu_contracts.env import build_git_auth_env
 
-from .config import TeamRuntimeConfig, TrenniConfig, _UNSET
+from .config import BundleRuntimeConfig, TrenniConfig, _UNSET
 from .runtime_types import JobRuntimeSpec, RuntimeDefaults
 
 build_git_credential_env = build_git_auth_env
@@ -45,12 +45,12 @@ class RuntimeSpecBuilder:
         self.config = config
         self.defaults = defaults
 
-    def _get_team_runtime(self, team: str) -> TeamRuntimeConfig | None:
-        """Get runtime config for a team, or None if team not found."""
-        team_config = self.config.teams.get(team)
-        if team_config is None:
+    def _get_bundle_runtime(self, bundle: str) -> BundleRuntimeConfig | None:
+        """Get runtime config for a bundle, or None if bundle not found."""
+        bundle_config = self.config.bundles.get(bundle)
+        if bundle_config is None:
             return None
-        return team_config.runtime
+        return bundle_config.runtime
 
     def build(
         self,
@@ -61,7 +61,7 @@ class RuntimeSpecBuilder:
         goal: str,
         role: str,
         role_params: dict | None = None,
-        team: str = "default",
+        bundle: str = "",
         repo: str,
         init_branch: str,
         evo_sha: str | None,
@@ -99,7 +99,7 @@ class RuntimeSpecBuilder:
                 "evo_sha": evo_sha or "",
                 "role": role,
                 "role_params": dict(role_params or {}),
-                "team": team,
+                "bundle": bundle,
                 "workspace": merged_workspace,
                 "llm": llm_config,
                 "publication": publication_config,
@@ -126,23 +126,23 @@ class RuntimeSpecBuilder:
             "io.yoitsu.evo-sha": evo_sha or "",
         }
 
-        # Get team runtime config and merge with defaults per ADR-0011 D4
-        team_runtime = self._get_team_runtime(team)
+        # Get bundle runtime config and merge with defaults per ADR-0011 D4
+        bundle_runtime = self._get_bundle_runtime(bundle)
 
         # Merge semantics per ADR-0011 D4:
-        # - image: team value overrides default if set (None = use default)
-        # - pod_name: team value overrides default if set (None = no pod); unset inherits default
-        # - env_allowlist: team value replaces default (not merged)
-        # - extra_networks: team value used (default is empty)
-        if team_runtime is not None:
-            image = team_runtime.image if team_runtime.image is not None else self.defaults.image
+        # - image: bundle value overrides default if set (None = use default)
+        # - pod_name: bundle value overrides default if set (None = no pod); unset inherits default
+        # - env_allowlist: bundle value replaces default (not merged)
+        # - extra_networks: bundle value used (default is empty)
+        if bundle_runtime is not None:
+            image = bundle_runtime.image if bundle_runtime.image is not None else self.defaults.image
             # pod_name: _UNSET = inherit default; None = explicit no pod; string = use that value
-            if team_runtime.pod_name is _UNSET:
+            if bundle_runtime.pod_name is _UNSET:
                 pod_name = self.defaults.pod_name
             else:
-                pod_name = team_runtime.pod_name  # Could be None (explicit no pod) or string
-            env_allowlist = tuple(team_runtime.env_allowlist) if team_runtime.env_allowlist else self.defaults.env_allowlist
-            extra_networks = tuple(team_runtime.extra_networks)
+                pod_name = bundle_runtime.pod_name  # Could be None (explicit no pod) or string
+            env_allowlist = tuple(bundle_runtime.env_allowlist) if bundle_runtime.env_allowlist else self.defaults.env_allowlist
+            extra_networks = tuple(bundle_runtime.extra_networks)
         else:
             # Team not found, use all defaults
             image = self.defaults.image
@@ -150,7 +150,7 @@ class RuntimeSpecBuilder:
             env_allowlist = self.defaults.env_allowlist
             extra_networks = ()
 
-        # Rebuild env with team's env_allowlist
+        # Rebuild env with bundle's env_allowlist
         env: dict[str, str] = {
             "PALIMPSEST_JOB_CONFIG_B64": payload_b64,
         }

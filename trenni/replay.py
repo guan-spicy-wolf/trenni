@@ -44,8 +44,8 @@ async def rebuild_state(supervisor) -> None:
     started_job_ids: set[str] = set()
     finished_job_ids: set[str] = set()
 
-    # Collect running jobs with team info for rebuilding team counts
-    running_jobs_with_teams: list[tuple[str, str]] = []
+    # Collect running jobs with bundle info for rebuilding bundle counts
+    running_jobs_with_bundles: list[tuple[str, str]] = []
 
     for event in all_events:
         if event.type == "supervisor.job.launched":
@@ -61,7 +61,7 @@ async def rebuild_state(supervisor) -> None:
                     task_id=task_id,
                     goal=event.data.get("goal", ""),
                     source_event_id=event.data.get("source_trigger_id", ""),
-                    spec={"team": event.data.get("team", "default")},
+                    spec={"bundle": event.data.get("bundle", "")},
                     eval_spec=(
                         EvalSpec.model_validate(event.data.get("eval_spec"))
                         if event.data.get("eval_spec")
@@ -70,7 +70,7 @@ async def rebuild_state(supervisor) -> None:
                 )
                 task = supervisor.state.tasks.get(task_id)
                 if task is not None:
-                    task.team = event.data.get("team", "default")
+                    task.bundle = event.data.get("bundle", "")
         elif event.type == "supervisor.task.evaluating":
             task_id = event.data.get("task_id", "")
             task = supervisor.state.tasks.get(task_id)
@@ -104,14 +104,14 @@ async def rebuild_state(supervisor) -> None:
         data = launched.data
         container_id = data.get("container_id", "")
         container_name = data.get("container_name", "")
-        team = data.get("team", "default")
+        bundle = data.get("bundle", "")
         state = await supervisor._inspect_replay_state(container_id, container_name)
         handle = supervisor._handle_from_replay(job_id, container_id, container_name)
 
         if state.exists and (state.running or state.status in ACTIVE_CONTAINER_STATES):
             supervisor.jobs[job_id] = handle
-            # Collect for team count rebuilding
-            running_jobs_with_teams.append((job_id, team))
+            # Collect for bundle count rebuilding
+            running_jobs_with_bundles.append((job_id, bundle))
             continue
 
         job = supervisor.state.jobs_by_id.get(job_id)
@@ -143,8 +143,8 @@ async def rebuild_state(supervisor) -> None:
         if cancelled:
             logger.info("Replay cancelled %s because its condition is already impossible", job_id)
 
-    # Rebuild team running counts from running jobs (Issue 5 fix)
-    supervisor.state.replay_team_counts(running_jobs_with_teams)
+    # Rebuild bundle running counts from running jobs (Issue 5 fix)
+    supervisor.state.replay_bundle_counts(running_jobs_with_bundles)
 
     logger.info(
         "Replay complete: running=%d pending=%d ready=%d tasks=%d",

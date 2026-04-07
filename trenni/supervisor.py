@@ -57,13 +57,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CHECKPOINT_CYCLES = 30
 _CONTROL_EVENT_TIMEOUT_S = 1.0
-_DEFAULT_TEAM_DEFINITION = SimpleNamespace(
-    name="default",
-    description="Default planning and execution team",
-    roles=["default"],
-    planner_role="planner",
-    eval_role="evaluator",
-)
 
 
 class Supervisor:
@@ -98,7 +91,7 @@ class Supervisor:
         self._launched_event_ids = self.state.launched_event_ids
         self._spawn_defaults_by_job = self.state.spawn_defaults_by_job
 
-        self.scheduler = Scheduler(self.state, max_workers=config.max_workers, teams=config.teams)
+        self.scheduler = Scheduler(self.state, max_workers=config.max_workers, bundles=config.bundles)
         self.spawn_handler = SpawnHandler(self.state)
 
         self._checkpoint_cycles = _DEFAULT_CHECKPOINT_CYCLES
@@ -256,11 +249,11 @@ class Supervisor:
                 self._pending[job.job_id] = job
                 continue
 
-            # Re-check team capacity right before launch (Issue 5 fix)
-            if not self.scheduler.has_team_capacity(job.team):
+            # Re-check bundle capacity right before launch (Issue 5 fix)
+            if not self.scheduler.has_bundle_capacity(job.bundle):
                 # Team at capacity - put back in pending
                 self._pending[job.job_id] = job
-                logger.debug("Job %s team %s at capacity, returning to pending", job.job_id, job.team)
+                logger.debug("Job %s bundle %s at capacity, returning to pending", job.job_id, job.bundle)
                 continue
 
             while not self.scheduler.has_capacity() or not self._resume_event.is_set():
@@ -272,10 +265,10 @@ class Supervisor:
                 if evaluation is None:
                     self._pending[job.job_id] = job
                     break
-                # Re-check team capacity during wait loop
-                if not self.scheduler.has_team_capacity(job.team):
+                # Re-check bundle capacity during wait loop
+                if not self.scheduler.has_bundle_capacity(job.bundle):
                     self._pending[job.job_id] = job
-                    logger.debug("Job %s team %s at capacity during wait, returning to pending", job.job_id, job.team)
+                    logger.debug("Job %s bundle %s at capacity during wait, returning to pending", job.job_id, job.bundle)
                     break
             else:
                 try:
@@ -295,7 +288,7 @@ class Supervisor:
             goal=job.goal,
             role=job.role,
             role_params=job.role_params,
-            team=job.team,
+            bundle=job.bundle,
             repo=job.repo,
             init_branch=job.init_branch,
             evo_sha=job.evo_sha,
@@ -424,28 +417,38 @@ class Supervisor:
         """Process a trigger event after validation.
 
         Shared logic for both direct triggers and external events.
+        Per Bundle MVP: bundle and role are required fields.
         """
         # goal is now required by pydantic (min_length=1), no need to check
 
         task_id = self._root_task_id(event.id)
         root_job_id = f"{task_id}-root"
-        team = str(data.team or "default").strip() or "default"
+        bundle = str(data.bundle or "").strip()
+        role = str(data.role or "").strip()
+        
+        # Validate required fields per Bundle MVP
+        if not bundle:
+            logger.error(f"Trigger {event.id} missing bundle field")
+            return
+        if not role:
+            logger.error(f"Trigger {event.id} missing role field")
+            return
 
         self.scheduler.record_task_submission(
             task_id=task_id,
             goal=data.goal,
             source_event_id=event.id,
-            spec={"team": team, "budget": data.budget, "role": data.role},
+            spec={"bundle": bundle, "budget": data.budget, "role": role},
         )
         if task_id in self.state.tasks:
-            self.state.tasks[task_id].team = team
+            self.state.tasks[task_id].bundle = bundle
 
         if not replay:
             await self.client.emit(
                 "supervisor.task.created",
                 TaskCreatedData(
                     task_id=task_id,
-                    team=team,
+                    bundle=bundle,
                     goal=data.goal,
                     source_trigger_id=event.id,
                 ).model_dump(mode="json"),
@@ -457,13 +460,7 @@ class Supervisor:
             )
 
         # Use canonical fields from TriggerData
-        team_def = self._resolve_team_definition(team)
-        role = data.role or team_def.planner_role or "planner"
-
-        # role_params contains only role-internal flags
         role_params = dict(data.params)
-        if role == team_def.planner_role:
-            role_params.setdefault("mode", "initial")
 
         repo = data.repo
         init_branch = data.init_branch or "main"
@@ -480,7 +477,7 @@ class Supervisor:
             evo_sha=evo_sha,
             budget=data.budget,
             task_id=task_id,
-            team=team,
+            bundle=bundle,
             input_artifacts=list(data.input_artifacts),  # ADR-0013
         )
         budget_error = self._validate_spawned_job_budget(root_job)
@@ -518,7 +515,7 @@ class Supervisor:
                     TaskCreatedData(
                         task_id=task.task_id,
                         parent_task_id=parent_id,
-                        team=task.team,
+                        bundle=task.bundle,
                         goal=task.goal,
                         source_trigger_id=task.source_event_id,
                         eval_spec=task.eval_spec,
@@ -614,11 +611,11 @@ class Supervisor:
         handle = self.jobs.pop(job_id, None)
         job_record = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None))
         task_id = job_record.task_id
-        team = job_record.team
+        bundle = job_record.bundle
         
-        # ADR-0011 D5: Track running jobs per team for launch conditions
-        if team:
-            self.state.decrement_team_running(team)
+        # ADR-0011 D5: Track running jobs per bundle for launch conditions
+        if bundle:
+            self.state.decrement_bundle_running(bundle)
         
         _, cancelled = await self.scheduler.record_job_terminal(
             job_id=job_id,
@@ -930,11 +927,11 @@ class Supervisor:
             self.jobs.pop(handle.job_id, None)
             job_record = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None))
             task_id = job_record.task_id if handle.job_id in self.state.jobs_by_id else handle.job_id
-            team = job_record.team
+            bundle = job_record.bundle
             
-            # ADR-0011 D5: Track running jobs per team for launch conditions
-            if team:
-                self.state.decrement_team_running(team)
+            # ADR-0011 D5: Track running jobs per bundle for launch conditions
+            if bundle:
+                self.state.decrement_bundle_running(bundle)
             
             await self.scheduler.record_job_terminal(
                 job_id=handle.job_id,
@@ -1000,7 +997,7 @@ class Supervisor:
         job_context=None,
         parent_job_id: str = "",
         condition=None,
-        team: str = "default",
+        bundle: str = "",
         role_params: dict[str, Any] | None = None,
         input_artifacts: list | None = None,  # ADR-0013
     ) -> None:
@@ -1012,7 +1009,7 @@ class Supervisor:
             goal=goal,
             role=role,
             role_params=role_params,
-            team=team,
+            bundle=bundle,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
@@ -1038,7 +1035,7 @@ class Supervisor:
             goal=goal,
             role=role,
             role_params=dict(role_params or {}),
-            team=team,
+            bundle=bundle,
             repo=repo,
             init_branch=init_branch,
             evo_sha=evo_sha,
@@ -1049,15 +1046,15 @@ class Supervisor:
             parent_job_id=parent_job_id,
         )
         
-        # ADR-0011 D5: Track running jobs per team for launch conditions
-        self.state.increment_team_running(team)
+        # ADR-0011 D5: Track running jobs per bundle for launch conditions
+        self.state.increment_bundle_running(bundle)
         
         self._spawn_defaults_by_job[job_id] = SpawnDefaults(
             repo=repo,
             init_branch=init_branch,
             role=role,
             role_params=dict(role_params or {}),
-            team=team,
+            bundle=bundle,
             evo_sha=evo_sha,
             task_id=task_id or job_id,
             budget=budget or 0.0,  # ADR-0010: for budget_variance observation
@@ -1155,14 +1152,15 @@ class Supervisor:
         ref = container_id or container_name or f"yoitsu-job-{job_id}"
         return JobHandle(job_id=job_id, container_id=container_id or ref, container_name=container_name or ref)
 
-    def _team_root(self) -> Path:
+    def _evo_root(self) -> Path:
+        """Get the evo root directory."""
         if self.config.evo_root:
             return Path(self.config.evo_root)
         return Path(__file__).resolve().parents[2] / "palimpsest" / "evo"
 
     def _read_evo_sha(self) -> str:
         """Read current HEAD SHA from evo root for cache invalidation."""
-        evo_root = self._team_root()
+        evo_root = self._evo_root()
         try:
             result = subprocess.run(
                 ["git", "-C", str(evo_root), "rev-parse", "HEAD"],
@@ -1174,269 +1172,15 @@ class Supervisor:
         except Exception:
             return ""
 
-    def _load_role_catalog(self) -> dict[str, dict[str, Any]]:
-        """Load role catalog with SHA-based cache invalidation.
-
-        Per ADR-0007: cache is invalidated when evo SHA changes.
-        Per ADR-0011 D2/D3: Team membership is determined by directory location:
-        - evo/roles/<name>.py → available to all teams (teams = ["*"])
-        - evo/teams/<team>/roles/<name>.py → available only to <team> (teams = [team_name])
-        Uses RoleMetadataReader from yoitsu-contracts for AST parsing.
-
-        Returns a dict keyed by role name, where each value is a dict containing:
-        - "global": the global role definition (if exists), or None
-        - "teams": {team_name: team_specific_definition, ...}
-
-        This structure preserves global roles when team-specific roles have the same name.
-        """
-        current_sha = self._read_evo_sha()
-        
-        # Invalidate cache if SHA changed
-        if current_sha != self._cached_evo_sha:
-            self._role_catalog_cache = None
-            if self._role_metadata_reader:
-                self._role_metadata_reader.invalidate_cache()
-            self._cached_evo_sha = current_sha
-
-        if self._role_catalog_cache is not None:
-            return self._role_catalog_cache
-
-        catalog: dict[str, dict[str, Any]] = {}
-        evo_root = self._team_root()
-
-        # Scan global roles (available to all teams)
-        global_roles_dir = evo_root / "roles"
-        if global_roles_dir.exists():
-            reader = RoleMetadataReader(evo_root)
-            for meta in reader.list_definitions():
-                catalog[meta.name] = {
-                    "global": {
-                        "name": meta.name,
-                        "description": meta.description,
-                        "role_type": meta.role_type,
-                        "teams": ["*"],  # Available to all teams (ADR-0011 D2)
-                        "min_cost": meta.min_cost,
-                        "recommended_cost": meta.recommended_cost,
-                        "max_cost": meta.max_cost,
-                        "min_capability": meta.min_capability,
-                        "source_team": None,  # Global role
-                    },
-                    "teams": {},  # No team-specific override yet
-                }
-
-        # Scan team-specific roles (ADR-0011 D3)
-        teams_dir = evo_root / "teams"
-        if teams_dir.exists():
-            for team_dir in teams_dir.iterdir():
-                if not team_dir.is_dir():
-                    continue
-                team_name = team_dir.name
-                team_roles_dir = team_dir / "roles"
-                if not team_roles_dir.exists():
-                    continue
-                # Create a reader scoped to this team's roles directory
-                for py_path in sorted(team_roles_dir.glob("*.py")):  
-                    if py_path.name.startswith("_"):
-                        continue
-                    meta = self._read_role_file(py_path, evo_root)
-                    if meta is None:
-                        continue
-                    # Add to existing entry (global role exists with same name) or create new
-                    if meta.name not in catalog:
-                        catalog[meta.name] = {
-                            "global": None,  # No global version
-                            "teams": {},
-                        }
-                    catalog[meta.name]["teams"][team_name] = {
-                        "name": meta.name,
-                        "description": meta.description,
-                        "role_type": meta.role_type,
-                        "teams": [team_name],  # Only this team (ADR-0011 D3)
-                        "min_cost": meta.min_cost,
-                        "recommended_cost": meta.recommended_cost,
-                        "max_cost": meta.max_cost,
-                        "min_capability": meta.min_capability,
-                        "source_team": team_name,  # Team-specific role
-                    }
-
-        self._role_catalog_cache = catalog
-        return catalog
-
-    def _get_role_for_team(self, role_name: str, team: str) -> dict[str, Any] | None:
-        """Get role definition for a specific team, preferring team-specific over global.
-
-        Args:
-            role_name: Name of the role to look up
-            team: Team name to resolve the role for
-
-        Returns:
-            Role definition dict, preferring team-specific version if available,
-            otherwise falling back to global version. Returns None if role not found.
-        """
-        catalog = self._load_role_catalog()
-        entry = catalog.get(role_name)
-        if not entry:
-            return None
-
-        # Prefer team-specific version
-        team_roles = entry.get("teams", {})
-        if team in team_roles:
-            return team_roles[team]
-
-        # Fallback to global version
-        return entry.get("global")
-
-    def _read_role_file(self, py_path: Path, evo_root: Path) -> "RoleMetadata | None":
-        """Read role metadata from a single Python file using AST parsing.
-
-        This is a lightweight version of RoleMetadataReader._read_role_file
-        for scanning team-specific role directories.
-        """
-        import ast
-        from dataclasses import dataclass, field
-        from typing import Any
-
-        @dataclass
-        class RoleMetadata:
-            name: str
-            description: str
-            teams: list[str] = field(default_factory=list)
-            role_type: str = "worker"
-            min_cost: float = 0.0
-            recommended_cost: float = 0.0
-            max_cost: float = 10.0
-            min_capability: str = ""
-
-        source = py_path.read_text(encoding="utf-8")
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return None
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                for decorator in node.decorator_list:
-                    if isinstance(decorator, ast.Call):
-                        if self._is_role_decorator_ast(decorator):
-                            return self._extract_metadata_ast(decorator, py_path, RoleMetadata)
-        return None
-
-    def _is_role_decorator_ast(self, decorator: "ast.Call") -> bool:
-        """Check if decorator call is @role(...)."""
-        import ast
-        if isinstance(decorator.func, ast.Name):
-            return decorator.func.id == "role"
-        if isinstance(decorator.func, ast.Attribute):
-            if decorator.func.attr == "role":
-                return True
-        return False
-
-    def _extract_metadata_ast(self, decorator: "ast.Call", py_path: Path, RoleMetadata: type) -> "RoleMetadata":
-        """Extract RoleMetadata from @role(...) decorator keywords."""
-        import ast
-        from typing import Any
-
-        kwargs: dict[str, Any] = {}
-        for keyword in decorator.keywords:
-            try:
-                value = ast.literal_eval(keyword.value)
-            except ValueError as e:
-                raise ValueError(
-                    f"Role decorator argument '{keyword.arg}' in {py_path} "
-                    f"must be a literal expression. Got non-literal: {ast.unparse(keyword.value)}. "
-                    f"Error: {e}"
-                ) from e
-            kwargs[keyword.arg] = value
-
-        return RoleMetadata(
-            name=str(kwargs.get("name", "")),
-            description=str(kwargs.get("description", "")),
-            teams=list(kwargs.get("teams", [])),  # Ignored per ADR-0011 D3
-            role_type=str(kwargs.get("role_type", "worker")),
-            min_cost=float(kwargs.get("min_cost", 0.0)),
-            recommended_cost=float(kwargs.get("recommended_cost", 0.0)),
-            max_cost=float(kwargs.get("max_cost", 10.0)),
-            min_capability=str(kwargs.get("min_capability", "")),
-        )
-
-    def _validate_role_catalog(self) -> None:
-        catalog = self._load_role_catalog()
-        # Collect all team names from the catalog structure
-        team_names = set()
-        for entry in catalog.values():
-            if entry.get("global"):
-                # Global roles are available to all teams
-                team_names.add("default")
-            team_names.update(entry.get("teams", {}).keys())
-        team_names = sorted(team_names)
-        if "default" not in team_names:
-            team_names.insert(0, "default")
-        for team_name in team_names:
-            self._resolve_team_definition(team_name)
-
-    def _resolve_role_metadata(self, role_name: str, team: str | None = None) -> dict[str, Any]:
-        """Resolve role metadata, optionally for a specific team.
-
-        Args:
-            role_name: Name of the role to look up
-            team: Optional team name. If provided, prefers team-specific version.
-                 If None, returns global version if available.
-
-        Returns:
-            Role definition dict.
-
-        Raises:
-            FileNotFoundError: If role not found for the given context.
-        """
-        catalog = self._load_role_catalog()
-        if role_name not in catalog:
-            raise FileNotFoundError(f"Role definition not found: {role_name!r}")
-
-        entry = catalog[role_name]
-
-        # If team specified, prefer team-specific version
-        if team:
-            team_roles = entry.get("teams", {})
-            if team in team_roles:
-                return team_roles[team]
-
-        # Fallback to global version
-        global_role = entry.get("global")
-        if global_role:
-            return global_role
-
-        # No global version exists, but team-specific versions do
-        # This means the role only exists for specific teams
-        available_teams = list(entry.get("teams", {}).keys())
-        raise FileNotFoundError(
-            f"Role {role_name!r} not available for team {team!r}. "
-            f"Available teams: {available_teams}"
-        )
-
     def _allocated_job_budget(self, job: SpawnedJob) -> float:
         """Get the allocated budget for a job.
 
-        Per ADR-0007: budget is read from SpawnedJob.budget (task semantics field).
-        Single channel, not role_params or llm_overrides.
-        
-        Fallback chain:
-        1. SpawnedJob.budget if > 0
-        2. Role's min_cost if role is resolvable
-        3. TrenniConfig.default_llm.max_total_cost
-        4. 0.0
+        Per Bundle MVP: budget is read from SpawnedJob.budget.
+        Fallback to TrenniConfig.default_llm.max_total_cost if not set.
         """
-        # Primary: budget field on SpawnedJob (ADR-0007)
+        # Primary: budget field on SpawnedJob
         if job.budget and job.budget > 0:
             return float(job.budget)
-        
-        # Fallback: role's min_cost (when budget is 0 or unspecified)
-        try:
-            meta = self._resolve_role_metadata(job.role, team=job.team)
-            min_cost = float(meta.get("min_cost", 0.0) or 0.0)
-            if min_cost > 0:
-                return min_cost
-        except FileNotFoundError:
-            pass  # Role not resolvable yet
         
         # Fallback: default from TrenniConfig
         default_budget = self.config.default_llm.get("max_total_cost")
@@ -1445,70 +1189,8 @@ class Supervisor:
         return 0.0
 
     def _validate_spawned_job_budget(self, job: SpawnedJob) -> str | None:
-        try:
-            meta = self._resolve_role_metadata(job.role, team=job.team)
-        except FileNotFoundError as exc:
-            return str(exc)
-        min_cost = float(meta.get("min_cost", 0.0) or 0.0)
-        allocated = self._allocated_job_budget(job)
-        if min_cost > 0 and allocated < min_cost:
-            return (
-                f"Allocated budget ${allocated:.4f} is below role {job.role!r} "
-                f"minimum cost ${min_cost:.4f}"
-            )
+        """Validate job budget. Per Bundle MVP, always returns None (no role metadata validation)."""
         return None
-
-    def _resolve_team_definition(self, name: str):
-        team_name = (name or "default").strip() or "default"
-        catalog = self._load_role_catalog()
-
-        # Per ADR-0011 D2: Build deduplicated member list with shadowing.
-        # Team-specific roles shadow global roles of the same name.
-        # For each role name, prefer team-specific over global.
-        seen_names: set[str] = set()
-        members: list[dict[str, Any]] = []
-
-        for role_name, entry in catalog.items():
-            # Prefer team-specific over global (shadowing semantics per ADR-0011 D2)
-            team_roles = entry.get("teams", {})
-            if team_name in team_roles:
-                # Team-specific version exists - use it, skip global
-                members.append(team_roles[team_name])
-                seen_names.add(role_name)
-            elif entry.get("global"):
-                # No team-specific version, use global
-                members.append(entry["global"])
-                seen_names.add(role_name)
-
-        if not members:
-            if team_name == "default":
-                return _DEFAULT_TEAM_DEFINITION
-            raise FileNotFoundError(f"No roles found for team {team_name!r}")
-
-        # Categorize by role_type (no duplicates possible now)
-        planners = [m for m in members if m["role_type"] == "planner"]
-        evaluators = [m for m in members if m["role_type"] == "evaluator"]
-        workers = [m for m in members if m["role_type"] == "worker"]
-
-        planner_names = [m["name"] for m in planners]
-        evaluator_names = [m["name"] for m in evaluators]
-        worker_names = [m["name"] for m in workers]
-
-        if len(planner_names) != 1:
-            raise ValueError(f"Team {team_name!r} must have exactly one planner role")
-        if len(evaluator_names) > 1:
-            raise ValueError(f"Team {team_name!r} must have at most one evaluator role")
-        if not worker_names:
-            raise ValueError(f"Team {team_name!r} must have at least one worker role")
-
-        return SimpleNamespace(
-            name=team_name,
-            description=f"Derived team {team_name}",
-            roles=[m["name"] for m in members],
-            planner_role=planner_names[0],
-            eval_role=evaluator_names[0] if evaluator_names else _DEFAULT_TEAM_DEFINITION.eval_role,
-            worker_roles=worker_names,
-        )
 
     def _register_replayed_launch(self, event: Event) -> None:
         """Register a job from a replayed supervisor.job.launched event.
@@ -1534,7 +1216,7 @@ class Supervisor:
             source_event_id=source_event_id,
             goal=data.get("goal", ""),
             role=data.get("role", "default"),
-            team=data.get("team", "default"),
+            bundle=data.get("bundle", ""),
             repo=data.get("repo", ""),
             init_branch=data.get("init_branch", "main"),
             evo_sha=data.get("evo_sha") or None,
@@ -1550,7 +1232,7 @@ class Supervisor:
             role=data.get("role", "default"),
             evo_sha=data.get("evo_sha") or None,
             task_id=data.get("task_id", "") or job_id,
-            team=data.get("team", "default"),
+            bundle=data.get("bundle", ""),
             budget=data.get("budget", 0.0),
         )
         if source_event_id:
@@ -1590,8 +1272,8 @@ class Supervisor:
         role definition or role_params.
         """
         eval_spec = task.eval_spec or EvalSpec()
-        team_def = self._resolve_team_definition(task.team)
-        role = eval_spec.role or team_def.eval_role or "evaluator"
+        # Per Bundle MVP: role must be specified in eval_spec or default to 'evaluator'
+        role = eval_spec.role or "evaluator"
         base_job = next(
             (
                 self.state.jobs_by_id[job_id]
@@ -1622,7 +1304,7 @@ class Supervisor:
             goal=self._eval_prompt(task.goal, eval_spec),
             role=role,
             role_params=eval_role_params,
-            team=task.team,
+            bundle=task.bundle,
             repo=base_job.repo if base_job else "",
             init_branch=eval_branch,
             evo_sha=base_job.evo_sha if base_job else None,
@@ -1831,7 +1513,7 @@ class Supervisor:
                 trigger_data = {
                     "goal": f"Analyze {r.metric_type} pattern ({r.count} occurrences in {self.config.observation_window_hours}h window). Output a ReviewProposal JSON in your summary with executable_proposal for improvement.",
                     "role": "optimizer",
-                    "team": "default",
+                    "bundle": "",
                     "budget": 0.5,
                     "params": {
                         "metric_type": r.metric_type,

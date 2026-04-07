@@ -49,7 +49,7 @@ def _is_unset(value: object) -> bool:
 
 
 @dataclass
-class TeamRuntimeConfig:
+class BundleRuntimeConfig:
     image: str | None = None
     # pod_name uses sentinel to distinguish "unset" (inherit default) from "explicit null" (no pod)
     pod_name: str | None | object = _UNSET  # type: ignore[assignment]
@@ -57,7 +57,7 @@ class TeamRuntimeConfig:
     extra_networks: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "TeamRuntimeConfig":
+    def from_dict(cls, data: dict | None) -> "BundleRuntimeConfig":
         payload = data or {}
         # Use sentinel for missing key to distinguish from explicit null/None
         pod_name = payload.get("pod_name", _UNSET)
@@ -70,26 +70,26 @@ class TeamRuntimeConfig:
 
 
 @dataclass
-class TeamSchedulingConfig:
+class BundleSchedulingConfig:
     max_concurrent_jobs: int = 0  # 0 = unlimited
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "TeamSchedulingConfig":
+    def from_dict(cls, data: dict | None) -> "BundleSchedulingConfig":
         payload = data or {}
         return cls(max_concurrent_jobs=int(payload.get("max_concurrent_jobs", 0)))
 
 
 @dataclass
-class TeamConfig:
-    runtime: TeamRuntimeConfig = field(default_factory=TeamRuntimeConfig)
-    scheduling: TeamSchedulingConfig = field(default_factory=TeamSchedulingConfig)
+class BundleConfig:
+    runtime: BundleRuntimeConfig = field(default_factory=BundleRuntimeConfig)
+    scheduling: BundleSchedulingConfig = field(default_factory=BundleSchedulingConfig)
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "TeamConfig":
+    def from_dict(cls, data: dict | None) -> "bundle_config":
         payload = data or {}
         return cls(
-            runtime=TeamRuntimeConfig.from_dict(payload.get("runtime")),
-            scheduling=TeamSchedulingConfig.from_dict(payload.get("scheduling")),
+            runtime=BundleRuntimeConfig.from_dict(payload.get("runtime")),
+            scheduling=BundleSchedulingConfig.from_dict(payload.get("scheduling")),
         )
 
 
@@ -111,7 +111,7 @@ class TrenniConfig:
     evo_root_host: str = ""  # Host path for volume mounts (when running in container)
 
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    teams: dict[str, TeamConfig] = field(default_factory=dict)
+    bundles: dict[str, BundleConfig] = field(default_factory=dict)
 
     max_workers: int = 4
     poll_interval: float = 2.0
@@ -163,12 +163,12 @@ class TrenniConfig:
         payload = {
             k: v
             for k, v in data.items()
-            if k in cls.__dataclass_fields__ and k not in ("runtime", "teams")
+            if k in cls.__dataclass_fields__ and k not in ("runtime", "bundles")
         }
         payload["runtime"] = RuntimeConfig.from_dict(data.get("runtime"))
-        payload["teams"] = {
-            name: TeamConfig.from_dict(team_data)
-            for name, team_data in (data.get("teams") or {}).items()
+        payload["bundles"] = {
+            name: BundleConfig.from_dict(bundle_data)
+            for name, bundle_data in (data.get("bundles") or {}).items()
         }
         return cls(**payload)
 

@@ -64,18 +64,18 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
         return supervisor.status
 
     @app.get("/control/tasks")
-    async def list_tasks(state: str | None = None, team: str | None = None):
+    async def list_tasks(state: str | None = None, bundle: str | None = None):
         tasks = []
         for task_id, record in sorted(supervisor.state.tasks.items()):
             item = {
                 "task_id": task_id,
                 "goal": record.goal,
                 "state": _task_state(record),
-                "team": record.team,
+                "bundle": record.bundle,
             }
             if state and item["state"] != state:
                 continue
-            if team and item["team"] != team:
+            if bundle and item["bundle"] != bundle:
                 continue
             tasks.append(item)
         return tasks
@@ -89,7 +89,7 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
             "task_id": task_id,
             "goal": record.goal,
             "state": _task_state(record),
-            "team": record.team,
+            "bundle": record.bundle,
             "eval_spawned": record.eval_spawned,
             "eval_job_id": record.eval_job_id,
             "job_order": list(record.job_order),
@@ -104,7 +104,7 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
                 "job_id": job_id,
                 "task_id": record.task_id,
                 "role": record.role,
-                "team": record.team,
+                "bundle": record.bundle,
                 "state": _job_queue_state(supervisor, job_id),
             }
             if task_id and item["task_id"] != task_id:
@@ -125,7 +125,7 @@ def build_control_app(supervisor: "Supervisor") -> FastAPI:
             "job_id": job_id,
             "task_id": record.task_id,
             "role": record.role,
-            "team": record.team,
+            "bundle": record.bundle,
             "state": _job_queue_state(supervisor, job_id),
             "parent_job_id": record.parent_job_id,
             "condition": None if record.condition is None else str(record.condition),

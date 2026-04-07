@@ -38,7 +38,7 @@ class SpawnedJob:
         condition: Optional condition for conditional execution.
         job_context: Join/eval context configuration.
         parent_job_id: Job ID of the spawning parent.
-        team: Team that owns this task (inherited, not overridable).
+        bundle: Bundle for this task (inherited, not overridable).
         input_artifacts: Artifacts to materialize in workspace (ADR-0013).
     """
 
@@ -56,7 +56,7 @@ class SpawnedJob:
     condition: Condition | None = None
     job_context: JobContextConfig = field(default_factory=JobContextConfig)
     parent_job_id: str = ""
-    team: str = "default"
+    bundle: str = ""
     input_artifacts: list[ArtifactBinding] = field(default_factory=list)
 
     def to_enqueued_data(self, queue_state: str, condition_data: dict | None) -> dict[str, Any]:
@@ -68,7 +68,7 @@ class SpawnedJob:
             "goal": self.goal,
             "role": self.role,
             "role_params": dict(self.role_params),
-            "team": self.team,
+            "bundle": self.bundle,
             "repo": self.repo,
             "init_branch": self.init_branch,
             "evo_sha": self.evo_sha or "",
@@ -89,7 +89,7 @@ class SpawnedJob:
             "goal": self.goal,
             "role": self.role,
             "role_params": dict(self.role_params),
-            "team": self.team,
+            "bundle": self.bundle,
             "repo": self.repo,
             "init_branch": self.init_branch,
             "evo_sha": self.evo_sha or "",
@@ -114,7 +114,7 @@ class SpawnedJob:
             goal=data["goal"],
             role=data["role"],
             role_params=dict(data.get("role_params", {})),
-            team=data.get("team", "default"),
+            bundle=data.get("bundle", ""),
             repo=data["repo"],
             init_branch=data["init_branch"],
             evo_sha=data.get("evo_sha") or None,
@@ -144,23 +144,23 @@ class SpawnDefaults:
     evo_sha: str | None
     role_params: dict[str, Any] = field(default_factory=dict)  # only role-internal flags
     task_id: str = ""
-    team: str = "default"
+    bundle: str = ""
     budget: float = 0.0  # ADR-0010: for budget_variance observation
 
 
 @dataclass
-class TeamLaunchCondition:
-    """Launch condition checking team concurrent job limit.
+class BundleLaunchCondition:
+    """Launch condition checking bundle concurrent job limit.
 
-    Per ADR-0011 D5: per-team launch conditions, not scheduling policy.
+    Per ADR-0011 D5: per-bundle launch conditions, not scheduling policy.
     The scheduler evaluates this condition alongside existing depends_on and
-    structural conditions. The scheduler itself has no team awareness.
+    structural conditions. The scheduler itself has no bundle awareness.
     """
-    team: str
+    bundle: str
     max_concurrent: int
 
     def is_satisfied(self, state: SupervisorState) -> bool:
-        """Check if team has room for another concurrent job.
+        """Check if bundle has room for another concurrent job.
 
         Returns True if:
         - max_concurrent <= 0 (no limit)
@@ -168,7 +168,7 @@ class TeamLaunchCondition:
         """
         if self.max_concurrent <= 0:
             return True  # No limit
-        return state.running_count_for_team(self.team) < self.max_concurrent
+        return state.running_count_for_bundle(self.bundle) < self.max_concurrent
 
 
 @dataclass
@@ -180,7 +180,7 @@ class TaskRecord:
     terminal_state: str = ""
     source_event_id: str = ""
     spec: dict = field(default_factory=dict)
-    team: str = "default"
+    bundle: str = ""
     eval_spec: EvalSpec | None = None
     eval_spawned: bool = False
     eval_job_id: str = ""
@@ -204,34 +204,34 @@ class SupervisorState:
     processed_event_ids: set[str] = field(default_factory=set)
     launched_event_ids: set[str] = field(default_factory=set)
     spawn_defaults_by_job: dict[str, SpawnDefaults] = field(default_factory=dict)
-    running_jobs_by_team: dict[str, int] = field(default_factory=dict)
+    running_jobs_by_bundle: dict[str, int] = field(default_factory=dict)
 
-    def increment_team_running(self, team: str) -> None:
-        """Increment running job count for a team."""
-        self.running_jobs_by_team[team] = self.running_jobs_by_team.get(team, 0) + 1
+    def increment_bundle_running(self, bundle: str) -> None:
+        """Increment running job count for a bundle."""
+        self.running_jobs_by_bundle[bundle] = self.running_jobs_by_bundle.get(bundle, 0) + 1
 
-    def decrement_team_running(self, team: str) -> None:
-        """Decrement running job count for a team (does not go below 0)."""
-        current = self.running_jobs_by_team.get(team, 0)
+    def decrement_bundle_running(self, bundle: str) -> None:
+        """Decrement running job count for a bundle (does not go below 0)."""
+        current = self.running_jobs_by_bundle.get(bundle, 0)
         if current > 0:
-            self.running_jobs_by_team[team] = current - 1
+            self.running_jobs_by_bundle[bundle] = current - 1
 
-    def running_count_for_team(self, team: str) -> int:
-        """Get running job count for a team (returns 0 if team not present)."""
-        return self.running_jobs_by_team.get(team, 0)
+    def running_count_for_bundle(self, bundle: str) -> int:
+        """Get running job count for a bundle (returns 0 if bundle not present)."""
+        return self.running_jobs_by_bundle.get(bundle, 0)
 
-    def replay_team_counts(self, running_jobs: list[tuple[str, str]]) -> None:
-        """Rebuild team running counts from running jobs after restart.
+    def replay_bundle_counts(self, running_jobs: list[tuple[str, str]]) -> None:
+        """Rebuild bundle running counts from running jobs after restart.
 
         Args:
-            running_jobs: List of (job_id, team) tuples for jobs that were
+            running_jobs: List of (job_id, bundle) tuples for jobs that were
                           running before restart.
 
-        This is called during replay to restore accurate team capacity
+        This is called during replay to restore accurate bundle capacity
         tracking without double-counting jobs that are already running.
         """
-        for job_id, team in running_jobs:
-            self.increment_team_running(team)
+        for job_id, bundle in running_jobs:
+            self.increment_bundle_running(bundle)
 
     def task_states(self) -> dict[str, str]:
         return {

@@ -73,7 +73,7 @@ class SpawnHandler:
                         f"Decompose into smaller tasks."
                     )
 
-            team = child.team or self._inherit("team", parent_job, parent_defaults, "default")
+            bundle = child.bundle or self._inherit("bundle", parent_job, parent_defaults, "default")
 
             child_defs.append(
                 (
@@ -85,7 +85,7 @@ class SpawnHandler:
                     repo,
                     init_branch,
                     evo_sha,
-                    team,
+                    bundle,
                     child.eval_spec,
                     budget,
                 )
@@ -100,19 +100,19 @@ class SpawnHandler:
                 spec={
                     "role": role,
                     "role_params": role_params,
-                    "team": team,
+                    "bundle": bundle,
                     "repo": repo,
                     "init_branch": init_branch,
                     "evo_sha": evo_sha,
                 },
-                team=team,
+                bundle=bundle,
                 eval_spec=eval_spec,
             )
-            for task_id, _, goal, role, role_params, repo, init_branch, evo_sha, team, eval_spec, _ in child_defs
+            for task_id, _, goal, role, role_params, repo, init_branch, evo_sha, bundle, eval_spec, _ in child_defs
         ]
 
         jobs: list[SpawnedJob] = []
-        for task_id, job_id, goal, role, role_params, repo, init_branch, evo_sha, team, _, budget in child_defs:
+        for task_id, job_id, goal, role, role_params, repo, init_branch, evo_sha, bundle, _, budget in child_defs:
             sibling_ids = [candidate for candidate in child_task_ids if candidate != task_id]
             guard_conditions = []
 
@@ -154,7 +154,7 @@ class SpawnHandler:
                     task_id=task_id,
                     condition=self._combine_conditions(guard_conditions),
                     parent_job_id=parent_job_id,
-                    team=team,
+                    bundle=bundle,
                     input_artifacts=list(child.input_artifacts),  # ADR-0013
                 )
             )
@@ -189,7 +189,7 @@ class SpawnHandler:
                         )
                     ),
                     parent_job_id=parent_job_id,
-                    team=parent_job.team,
+                    bundle=parent_job.bundle,
                 )
             )
 

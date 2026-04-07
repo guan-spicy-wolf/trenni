@@ -18,29 +18,29 @@ class Scheduler:
         state: SupervisorState,
         *,
         max_workers: int,
-        teams: Mapping[str, TeamConfig] | None = None,
+        bundles: Mapping[str, BundleConfig] | None = None,
     ) -> None:
         self.state = state
         self.max_workers = max_workers
-        self.teams: Mapping[str, TeamConfig] = teams or {}
+        self.bundles: Mapping[str, BundleConfig] = bundles or {}
 
     def has_capacity(self) -> bool:
         return len(self.state.running_jobs) < self.max_workers
 
-    def has_team_capacity(self, team: str) -> bool:
-        """Check if team has capacity for another job.
+    def has_bundle_capacity(self, bundle: str) -> bool:
+        """Check if bundle has capacity for another job.
 
         Returns True if:
         - Team not configured (no limit)
         - Team max_concurrent_jobs is 0 or negative (unlimited)
         - Current running count < max_concurrent_jobs
         """
-        team_config = self.teams.get(team)
-        if team_config is None:
-            return True  # No config for team = no limit
+        bundle_config = self.bundles.get(bundle)
+        if bundle_config is None:
+            return True  # No config for bundle = no limit
 
         condition = TeamLaunchCondition(
-            team=team, max_concurrent=team_config.scheduling.max_concurrent_jobs
+            bundle=bundle, max_concurrent=bundle_config.scheduling.max_concurrent_jobs
         )
         return condition.is_satisfied(self.state)
 
@@ -78,8 +78,8 @@ class Scheduler:
 
         outcome = self.evaluate_job(job)
         if outcome is True:
-            # Check team capacity before putting in ready queue
-            if self.has_team_capacity(job.team):
+            # Check bundle capacity before putting in ready queue
+            if self.has_bundle_capacity(job.bundle):
                 await self.state.ready_queue.put(job)
                 return []
             else:
@@ -164,26 +164,26 @@ class Scheduler:
         ready: list[SpawnedJob] = []
         cancelled: list[SpawnedJob] = []
 
-        # Track virtual team capacity consumed during this iteration.
+        # Track virtual bundle capacity consumed during this iteration.
         # Jobs promoted to ready queue haven't launched yet, so their
-        # team running count isn't incremented. We need to track this
-        # to prevent over-promoting from same team in one iteration.
-        virtual_team_running: dict[str, int] = {}
+        # bundle running count isn't incremented. We need to track this
+        # to prevent over-promoting from same bundle in one iteration.
+        virtual_bundle_running: dict[str, int] = {}
 
         for job_id, job in list(self.state.pending_jobs.items()):
             outcome = self.evaluate_job(job)
             if outcome is True:
-                # Check team capacity including virtual jobs already promoted
-                team_config = self.teams.get(job.team)
-                if team_config is None or team_config.scheduling.max_concurrent_jobs <= 0:
-                    # No limit for this team
+                # Check bundle capacity including virtual jobs already promoted
+                bundle_config = self.bundles.get(job.bundle)
+                if bundle_config is None or bundle_config.scheduling.max_concurrent_jobs <= 0:
+                    # No limit for this bundle
                     del self.state.pending_jobs[job_id]
                     await self.state.ready_queue.put(job)
                     ready.append(job)
                 else:
-                    max_concurrent = team_config.scheduling.max_concurrent_jobs
-                    actual_running = self.state.running_count_for_team(job.team)
-                    virtual_running = virtual_team_running.get(job.team, 0)
+                    max_concurrent = bundle_config.scheduling.max_concurrent_jobs
+                    actual_running = self.state.running_count_for_bundle(job.bundle)
+                    virtual_running = virtual_bundle_running.get(job.bundle, 0)
                     total_running = actual_running + virtual_running
 
                     if total_running < max_concurrent:
@@ -191,8 +191,8 @@ class Scheduler:
                         del self.state.pending_jobs[job_id]
                         await self.state.ready_queue.put(job)
                         ready.append(job)
-                        virtual_team_running[job.team] = virtual_running + 1
-                    # else: keep in pending, team at capacity
+                        virtual_bundle_running[job.bundle] = virtual_running + 1
+                    # else: keep in pending, bundle at capacity
             elif outcome is False:
                 del self.state.pending_jobs[job_id]
                 cancelled.append(job)
