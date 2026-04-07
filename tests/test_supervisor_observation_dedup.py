@@ -187,7 +187,7 @@ class TestImplementerPathAllowlist:
             
             # Simulate git status --porcelain output
             # Format: " M PATH" for modified unstaged, "?? PATH" for untracked
-            porcelain_output = f" M teams/factorio/scripts/test.lua\n?? docs/README.md\n"
+            porcelain_output = f" M factorio/evolved/scripts/test.lua\n?? docs/README.md\n"
             
             # Parse changes
             changed = []
@@ -203,10 +203,10 @@ class TestImplementerPathAllowlist:
                 if path:
                     changed.append(path)
             
-            # Check allowlist
+            # Check allowlist (Bundle MVP: only factorio/evolved/scripts/)
             forbidden = [
                 p for p in changed
-                if not p.startswith("teams/factorio/scripts/") and not p.startswith("mod/scripts/")
+                if not p.startswith("factorio/evolved/scripts/")
             ]
             
             assert forbidden == ["docs/README.md"]
@@ -229,9 +229,10 @@ class TestImplementerPathAllowlist:
             if path:
                 changed.append(path)
         
+        # Check allowlist (Bundle MVP: only factorio/evolved/scripts/)
         forbidden = [
             p for p in changed
-            if not p.startswith("teams/factorio/scripts/") and not p.startswith("mod/scripts/")
+            if not p.startswith("factorio/evolved/scripts/")
         ]
         
         assert forbidden == ["docs/hacked.lua"]
