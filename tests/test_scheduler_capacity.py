@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from trenni.config import TeamConfig, TeamSchedulingConfig
+from trenni.config import BundleConfig, BundleSchedulingConfig
 from trenni.scheduler import Scheduler
 from trenni.state import SupervisorState, SpawnedJob
 
@@ -32,8 +32,8 @@ class TestStrictTeamCapacityAtLaunch:
         3. _drain_queue() should only launch one, re-queue the other
         """
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         # Put two jobs in ready queue for the same team
         job1 = SpawnedJob(
@@ -85,8 +85,8 @@ class TestStrictTeamCapacityAtLaunch:
         This tests the mechanism that _drain_queue should use.
         """
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         job = SpawnedJob(
             job_id="job-1",
@@ -178,8 +178,8 @@ class TestDrainQueueTeamCapacity:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         # Two jobs ready for same team
         job1 = SpawnedJob(
@@ -259,8 +259,8 @@ class TestTeamCapacityWithPendingPromotion:
     async def test_pending_job_promoted_when_team_has_capacity(self):
         """Pending job should be promoted to ready when team has capacity."""
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         job = SpawnedJob(
             job_id="job-1",
@@ -287,8 +287,8 @@ class TestTeamCapacityWithPendingPromotion:
     async def test_pending_job_stays_pending_when_team_at_capacity(self):
         """Pending job should stay pending when team is at capacity."""
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         job = SpawnedJob(
             job_id="job-1",
@@ -314,8 +314,8 @@ class TestTeamCapacityWithPendingPromotion:
     async def test_multiple_pending_jobs_respect_capacity(self):
         """Multiple pending jobs should only be promoted up to capacity limit."""
         state = SupervisorState()
-        teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2))}
-        scheduler = Scheduler(state, max_workers=10, teams=teams)
+        teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2))}
+        scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
         job1 = SpawnedJob(
             job_id="job-1",

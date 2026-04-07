@@ -1,4 +1,4 @@
-"""Tests for SupervisorState running_jobs_by_team tracking and TeamLaunchCondition.
+"""Tests for SupervisorState running_jobs_by_team tracking and BundleLaunchCondition.
 
 ADR-0011 D5: Per-team launch conditions, not scheduling policy.
 """
@@ -89,13 +89,13 @@ def test_supervisor_state_running_count_for_team():
 
 
 def test_team_launch_condition_is_satisfied():
-    """TeamLaunchCondition.is_satisfied checks running count against max_concurrent."""
-    from trenni.state import SupervisorState, TeamLaunchCondition
+    """BundleLaunchCondition.is_satisfied checks running count against max_concurrent."""
+    from trenni.state import SupervisorState, BundleLaunchCondition
 
     state = SupervisorState()
 
     # max_concurrent=1, 0 running -> satisfied
-    condition = TeamLaunchCondition(team="factorio", max_concurrent=1)
+    condition = BundleLaunchCondition(team="factorio", max_concurrent=1)
     assert condition.is_satisfied(state) is True
 
     # max_concurrent=1, 1 running -> not satisfied
@@ -104,32 +104,32 @@ def test_team_launch_condition_is_satisfied():
 
 
 def test_team_launch_condition_unlimited_when_max_concurrent_zero():
-    """TeamLaunchCondition with max_concurrent=0 or negative means no limit."""
-    from trenni.state import SupervisorState, TeamLaunchCondition
+    """BundleLaunchCondition with max_concurrent=0 or negative means no limit."""
+    from trenni.state import SupervisorState, BundleLaunchCondition
 
     state = SupervisorState()
 
     # max_concurrent=0 -> always satisfied (no limit)
-    condition_zero = TeamLaunchCondition(team="factorio", max_concurrent=0)
+    condition_zero = BundleLaunchCondition(team="factorio", max_concurrent=0)
     state.increment_team_running("factorio")
     state.increment_team_running("factorio")
     state.increment_team_running("factorio")
     assert condition_zero.is_satisfied(state) is True
 
     # max_concurrent=-1 -> also no limit (negative treated as unlimited)
-    condition_negative = TeamLaunchCondition(team="factorio", max_concurrent=-1)
+    condition_negative = BundleLaunchCondition(team="factorio", max_concurrent=-1)
     assert condition_negative.is_satisfied(state) is True
 
 
 def test_team_launch_condition_different_teams_independent():
-    """TeamLaunchCondition checks are independent per team."""
-    from trenni.state import SupervisorState, TeamLaunchCondition
+    """BundleLaunchCondition checks are independent per team."""
+    from trenni.state import SupervisorState, BundleLaunchCondition
 
     state = SupervisorState()
 
     # factorio has max_concurrent=1, default has max_concurrent=2
-    factorio_condition = TeamLaunchCondition(team="factorio", max_concurrent=1)
-    default_condition = TeamLaunchCondition(team="default", max_concurrent=2)
+    factorio_condition = BundleLaunchCondition(team="factorio", max_concurrent=1)
+    default_condition = BundleLaunchCondition(team="default", max_concurrent=2)
 
     # Both satisfied initially
     assert factorio_condition.is_satisfied(state) is True

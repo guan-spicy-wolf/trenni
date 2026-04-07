@@ -2,7 +2,7 @@
 
 import pytest
 
-from trenni.config import TrenniConfig, TeamConfig, TeamRuntimeConfig, TeamSchedulingConfig
+from trenni.config import TrenniConfig, BundleConfig, BundleRuntimeConfig, BundleSchedulingConfig
 from trenni.runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
 from trenni.runtime_types import RuntimeDefaults
 
@@ -19,19 +19,19 @@ def test_runtime_spec_builder_uses_team_config():
     # Create TrenniConfig with factorio team having custom runtime settings
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
-        teams={
-            "factorio": TeamConfig(
-                runtime=TeamRuntimeConfig(
+        bundles={
+            "factorio": BundleConfig(
+                runtime=BundleRuntimeConfig(
                     image="localhost/factorio-job:custom",
                     pod_name="factorio-pod",
                     env_allowlist=["FACTORIO_API_KEY", "CUSTOM_VAR"],
                     extra_networks=["factorio-network", "shared-network"],
                 ),
-                scheduling=TeamSchedulingConfig(),
+                scheduling=BundleSchedulingConfig(),
             ),
-            "default": TeamConfig(
-                runtime=TeamRuntimeConfig(),  # No overrides
-                scheduling=TeamSchedulingConfig(),
+            "default": BundleConfig(
+                runtime=BundleRuntimeConfig(),  # No overrides
+                scheduling=BundleSchedulingConfig(),
             ),
         },
     )
@@ -80,13 +80,13 @@ def test_runtime_spec_builder_team_missing_image_uses_default():
     """When team has no image override, use default image."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
-        teams={
-            "minimal": TeamConfig(
-                runtime=TeamRuntimeConfig(
+        bundles={
+            "minimal": BundleConfig(
+                runtime=BundleRuntimeConfig(
                     # image=None (default)
                     pod_name="minimal-pod",
                 ),
-                scheduling=TeamSchedulingConfig(),
+                scheduling=BundleSchedulingConfig(),
             ),
         },
     )
@@ -127,12 +127,12 @@ def test_runtime_spec_builder_team_none_pod_name_means_no_pod():
     """When team explicitly sets pod_name to None, job should have no pod."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
-        teams={
-            "no-pod-team": TeamConfig(
-                runtime=TeamRuntimeConfig(
+        bundles={
+            "no-pod-team": BundleConfig(
+                runtime=BundleRuntimeConfig(
                     pod_name=None,  # Explicitly no pod
                 ),
-                scheduling=TeamSchedulingConfig(),
+                scheduling=BundleSchedulingConfig(),
             ),
         },
     )
@@ -172,11 +172,11 @@ def test_runtime_spec_builder_unknown_team_uses_defaults():
     """When team is not in config, use all defaults."""
     config = TrenniConfig(
         runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
-        teams={
+        bundles={
             # No "unknown-team" defined
-            "other": TeamConfig(
-                runtime=TeamRuntimeConfig(),
-                scheduling=TeamSchedulingConfig(),
+            "other": BundleConfig(
+                runtime=BundleRuntimeConfig(),
+                scheduling=BundleSchedulingConfig(),
             ),
         },
     )

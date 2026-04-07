@@ -1,6 +1,6 @@
-"""Tests for Scheduler TeamLaunchCondition integration.
+"""Tests for Scheduler BundleLaunchCondition integration.
 
-ADR-0011 D5: Scheduler checks TeamLaunchCondition before launching jobs.
+ADR-0011 D5: Scheduler checks BundleLaunchCondition before launching jobs.
 """
 
 import pytest
@@ -10,17 +10,17 @@ def test_scheduler_accepts_teams_config():
     """Scheduler accepts teams configuration in constructor."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
     teams = {
-        "factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2)),
-        "default": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=0)),  # unlimited
+        "factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2)),
+        "default": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=0)),  # unlimited
     }
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
-    assert scheduler.teams == teams
+    assert scheduler.bundles == teams
 
 
 def test_scheduler_teams_defaults_to_empty_dict():
@@ -31,19 +31,19 @@ def test_scheduler_teams_defaults_to_empty_dict():
     state = SupervisorState()
     scheduler = Scheduler(state, max_workers=10)
 
-    assert scheduler.teams == {}
+    assert scheduler.bundles == {}
 
 
 def test_scheduler_has_team_capacity_for_unlimited_team():
     """Scheduler allows launch when team has max_concurrent_jobs=0 (unlimited)."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=0))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=0))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Team has 5 running jobs but max_concurrent=0 (unlimited)
     for _ in range(5):
@@ -56,12 +56,12 @@ def test_scheduler_has_team_capacity_when_below_limit():
     """Scheduler allows launch when team running count is below max."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=3))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=3))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # 2 running, max 3 -> has capacity
     state.increment_team_running("factorio")
@@ -74,12 +74,12 @@ def test_scheduler_has_team_capacity_when_at_limit():
     """Scheduler denies launch when team running count equals max."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # 2 running, max 2 -> no capacity
     state.increment_team_running("factorio")
@@ -94,7 +94,7 @@ def test_scheduler_has_team_capacity_for_unknown_team():
     from trenni.state import SupervisorState
 
     state = SupervisorState()
-    scheduler = Scheduler(state, max_workers=10, teams={})
+    scheduler = Scheduler(state, max_workers=10, bundles={})
 
     # Unknown team has no limit
     assert scheduler.has_team_capacity("unknown-team") is True
@@ -104,15 +104,15 @@ def test_scheduler_has_team_capacity_independent_per_team():
     """Team capacity checks are independent per team."""
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
     teams = {
-        "factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1)),
-        "default": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2)),
+        "factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1)),
+        "default": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2)),
     }
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Both teams at capacity
     state.increment_team_running("factorio")
@@ -129,12 +129,12 @@ def test_scheduler_enqueue_checks_team_capacity():
     import asyncio
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState, SpawnedJob
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # First job should go to ready queue
     job1 = SpawnedJob(
@@ -179,15 +179,15 @@ def test_scheduler_enqueue_different_teams_independent():
     import asyncio
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState, SpawnedJob
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
     teams = {
-        "factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1)),
-        "default": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1)),
+        "factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1)),
+        "default": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1)),
     }
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Launch factorio job
     job1 = SpawnedJob(
@@ -226,12 +226,12 @@ def test_scheduler_resolve_pending_respects_team_capacity():
     import asyncio
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState, SpawnedJob
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=1))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=1))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Put job in pending (simulating condition that was previously unsatisfied)
     job = SpawnedJob(
@@ -262,12 +262,12 @@ def test_scheduler_resolve_pending_promotes_when_team_has_capacity():
     import asyncio
     from trenni.scheduler import Scheduler
     from trenni.state import SupervisorState, SpawnedJob
-    from trenni.config import TeamConfig, TeamSchedulingConfig
+    from trenni.config import BundleConfig, BundleSchedulingConfig
 
     state = SupervisorState()
-    teams = {"factorio": TeamConfig(scheduling=TeamSchedulingConfig(max_concurrent_jobs=2))}
+    teams = {"factorio": BundleConfig(scheduling=BundleSchedulingConfig(max_concurrent_jobs=2))}
 
-    scheduler = Scheduler(state, max_workers=10, teams=teams)
+    scheduler = Scheduler(state, max_workers=10, bundles=teams)
 
     # Put job in pending
     job = SpawnedJob(

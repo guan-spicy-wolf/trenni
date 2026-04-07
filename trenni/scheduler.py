@@ -6,8 +6,8 @@ from typing import Mapping
 from yoitsu_contracts.conditions import evaluate_condition
 from yoitsu_contracts.events import EvalSpec
 
-from .config import TeamConfig
-from .state import SpawnedJob, SupervisorState, TaskRecord, TeamLaunchCondition
+from .config import BundleConfig
+from .state import SpawnedJob, SupervisorState, TaskRecord, BundleLaunchCondition
 
 _TASK_TERMINAL_STATES = {"complete", "failed", "cancelled"}
 
@@ -39,7 +39,7 @@ class Scheduler:
         if bundle_config is None:
             return True  # No config for bundle = no limit
 
-        condition = TeamLaunchCondition(
+        condition = BundleLaunchCondition(
             bundle=bundle, max_concurrent=bundle_config.scheduling.max_concurrent_jobs
         )
         return condition.is_satisfied(self.state)

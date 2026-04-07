@@ -1,8 +1,8 @@
-"""Tests for pod_name sentinel semantics in TeamRuntimeConfig.
+"""Tests for pod_name sentinel semantics in BundleRuntimeConfig.
 
 Issue: pod_name "unset" vs "explicit null" semantics
 
-- `TeamRuntimeConfig.from_dict()` uses `payload.get("pod_name")` which returns `None`
+- `BundleRuntimeConfig.from_dict()` uses `payload.get("pod_name")` which returns `None`
   for both missing key and explicit `null`
 - `RuntimeSpecBuilder` interprets `None` as "no pod"
 - A team that only wants to override `image` will accidentally脱离 default pod
@@ -12,37 +12,37 @@ Fix: Use a sentinel value to distinguish "unset" from "explicit null".
 
 import pytest
 
-from trenni.config import PodmanRuntimeConfig, RuntimeConfig, TeamRuntimeConfig, TeamConfig, TrenniConfig, _UNSET
+from trenni.config import PodmanRuntimeConfig, RuntimeConfig, BundleRuntimeConfig, BundleConfig, TrenniConfig, _UNSET
 from trenni.runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
 
 
-class TestTeamRuntimeConfigSentinel:
-    """Tests for TeamRuntimeConfig sentinel handling."""
+class TestBundleRuntimeConfigSentinel:
+    """Tests for BundleRuntimeConfig sentinel handling."""
 
     def test_pod_name_unset_when_missing(self):
         """When pod_name key is missing, it should be _UNSET (not None)."""
-        config = TeamRuntimeConfig.from_dict({"image": "my-image"})
+        config = BundleRuntimeConfig.from_dict({"image": "my-image"})
         # pod_name should be _UNSET sentinel, not None
         assert config.pod_name is _UNSET or config.pod_name == _UNSET
 
     def test_pod_name_explicit_null(self):
         """When pod_name is explicitly null, it should be None."""
-        config = TeamRuntimeConfig.from_dict({"pod_name": None})
+        config = BundleRuntimeConfig.from_dict({"pod_name": None})
         assert config.pod_name is None
 
     def test_pod_name_explicit_string(self):
         """When pod_name is explicitly set to a string, use that value."""
-        config = TeamRuntimeConfig.from_dict({"pod_name": "custom-pod"})
+        config = BundleRuntimeConfig.from_dict({"pod_name": "custom-pod"})
         assert config.pod_name == "custom-pod"
 
     def test_pod_name_unset_from_empty_dict(self):
         """Empty dict should leave pod_name unset."""
-        config = TeamRuntimeConfig.from_dict({})
+        config = BundleRuntimeConfig.from_dict({})
         assert config.pod_name is _UNSET or config.pod_name == _UNSET
 
     def test_pod_name_unset_from_none(self):
         """None input should leave pod_name unset."""
-        config = TeamRuntimeConfig.from_dict(None)
+        config = BundleRuntimeConfig.from_dict(None)
         assert config.pod_name is _UNSET or config.pod_name == _UNSET
 
 
@@ -60,13 +60,13 @@ class TestRuntimeSpecBuilderPodNameInheritance:
                     image="default-image",
                 ),
             ),
-            teams={},
+            bundles={},
         )
 
     def test_unset_pod_name_inherits_default(self, base_config):
         """When pod_name is unset, should inherit from defaults."""
         # Add team with only image override (no pod_name specified)
-        base_config.teams["my-team"] = TeamConfig.from_dict({
+        base_config.bundles["my-bundle"] = BundleConfig.from_dict({
             "runtime": {"image": "team-image"}
         })
 
@@ -81,7 +81,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
             repo="test/repo",
             init_branch="main",
             evo_sha=None,
-            team="my-team",
+            bundle="my-bundle",
         )
 
         # Should inherit default pod_name since it was unset
@@ -90,7 +90,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
     def test_explicit_null_pod_name_means_no_pod(self, base_config):
         """When pod_name is explicitly null, should have no pod (None)."""
         # Add team with explicit null pod_name
-        base_config.teams["my-team"] = TeamConfig.from_dict({
+        base_config.bundles["my-bundle"] = BundleConfig.from_dict({
             "runtime": {"pod_name": None, "image": "team-image"}
         })
 
@@ -105,7 +105,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
             repo="test/repo",
             init_branch="main",
             evo_sha=None,
-            team="my-team",
+            bundle="my-bundle",
         )
 
         # Explicit null means no pod
@@ -114,7 +114,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
     def test_explicit_pod_name_overrides_default(self, base_config):
         """When pod_name is explicitly set, should override default."""
         # Add team with explicit pod_name
-        base_config.teams["my-team"] = TeamConfig.from_dict({
+        base_config.bundles["my-bundle"] = BundleConfig.from_dict({
             "runtime": {"pod_name": "custom-pod", "image": "team-image"}
         })
 
@@ -129,13 +129,13 @@ class TestRuntimeSpecBuilderPodNameInheritance:
             repo="test/repo",
             init_branch="main",
             evo_sha=None,
-            team="my-team",
+            bundle="my-bundle",
         )
 
         # Should use team's explicit pod_name
         assert spec.pod_name == "custom-pod"
 
-    def test_unknown_team_uses_defaults(self, base_config):
+    def test_unknown_bundle_uses_defaults(self, base_config):
         """Unknown team should use all defaults."""
         defaults = build_runtime_defaults(base_config)
         builder = RuntimeSpecBuilder(base_config, defaults)
@@ -148,7 +148,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
             repo="test/repo",
             init_branch="main",
             evo_sha=None,
-            team="unknown-team",
+            bundle="unknown-team",
         )
 
         # Unknown team uses defaults
@@ -160,7 +160,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
         This is the key bug fix scenario.
         """
         # Team wants custom image but default pod
-        base_config.teams["my-team"] = TeamConfig.from_dict({
+        base_config.bundles["my-bundle"] = BundleConfig.from_dict({
             "runtime": {"image": "custom-image"}
         })
 
@@ -175,7 +175,7 @@ class TestRuntimeSpecBuilderPodNameInheritance:
             repo="test/repo",
             init_branch="main",
             evo_sha=None,
-            team="my-team",
+            bundle="my-bundle",
         )
 
         # Image should be overridden
