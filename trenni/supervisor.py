@@ -1375,6 +1375,7 @@ class Supervisor:
                     task_id=job.task_id or job_id,
                     job_id=job_id,
                     role=job.role,
+                    bundle=job.bundle,
                     estimated_budget=estimated_budget,
                     actual_cost=actual_cost,
                     variance_ratio=variance_ratio,
@@ -1422,6 +1423,10 @@ class Supervisor:
 
         # Convert proposal to trigger data
         trigger_data = review_proposal_to_trigger(proposal)
+        
+        # Bundle MVP: inherit bundle from parent job if not specified in proposal
+        if not trigger_data.get("bundle") and job.bundle:
+            trigger_data["bundle"] = job.bundle
 
         # Create synthetic event for _process_trigger
         synthetic_event = SimpleNamespace(
