@@ -320,6 +320,64 @@ async def test_aggregate_partial_processed_ids(sample_events):
 
 
 @pytest.mark.asyncio
+async def test_api_key_header_is_x_api_key():
+    """API key should be sent via X-API-Key header, not Authorization: Bearer."""
+    events = [{"id": "evt-1", "type": "observation.tool_repetition", "ts": "2024-01-01T00:00:00Z", "data": {}}]
+    
+    captured_headers = None
+    async def mock_get(url, params, headers=None):
+        nonlocal captured_headers
+        captured_headers = headers
+        return make_response(events)
+    
+    mock_client = MagicMock()
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await aggregate_observations(
+            "http://localhost:8000",
+            window_hours=24,
+            thresholds={"tool_repetition": 1.0},
+            api_key="test-api-key",
+        )
+    
+    assert captured_headers is not None
+    assert captured_headers.get("X-API-Key") == "test-api-key"
+    assert "Authorization" not in captured_headers
+
+
+@pytest.mark.asyncio
+async def test_no_api_key_means_no_header():
+    """When api_key is empty, no auth header should be sent."""
+    events = [{"id": "evt-1", "type": "observation.tool_repetition", "ts": "2024-01-01T00:00:00Z", "data": {}}]
+    
+    captured_headers = None
+    async def mock_get(url, params, headers=None):
+        nonlocal captured_headers
+        captured_headers = headers
+        return make_response(events)
+    
+    mock_client = MagicMock()
+    mock_client.get = mock_get
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await aggregate_observations(
+            "http://localhost:8000",
+            window_hours=24,
+            thresholds={"tool_repetition": 1.0},
+            api_key="",  # No API key
+        )
+    
+    assert captured_headers is not None
+    assert "X-API-Key" not in captured_headers
+    assert "Authorization" not in captured_headers
+
+
+@pytest.mark.asyncio
 async def test_window_count_semantics_for_threshold():
     """Threshold uses window-wide total, not just 'new this round'."""
     round1_events = [

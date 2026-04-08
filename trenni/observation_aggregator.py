@@ -76,7 +76,7 @@ async def aggregate_observations(
     
     headers = {}
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-API-Key"] = api_key
     
     async with httpx.AsyncClient() as client:
         while True:
