@@ -236,3 +236,124 @@ class TestImplementerPathAllowlist:
         ]
         
         assert forbidden == ["docs/hacked.lua"]
+
+class TestResolveBundleForObservations:
+    """Test _resolve_bundle_for_observations helper function."""
+
+    def test_bundle_from_evidence_majority_vote(self):
+        """Bundle resolved by majority vote from evidence."""
+        from trenni.supervisor import _resolve_bundle_for_observations
+        
+        evidence = [
+            {"bundle": "factorio", "tool_name": "test1"},
+            {"bundle": "factorio", "tool_name": "test2"},
+            {"bundle": "factorio", "tool_name": "test3"},
+            {"bundle": "default", "tool_name": "test4"},
+            {"bundle": "default", "tool_name": "test5"},
+        ]
+        
+        result = _resolve_bundle_for_observations(evidence)
+        assert result == "factorio"  # 3 votes vs 2
+
+    def test_bundle_fallback_to_default_when_empty(self):
+        """When evidence is empty, fallback to 'default' with warning."""
+        from trenni.supervisor import _resolve_bundle_for_observations
+        
+        result = _resolve_bundle_for_observations([])
+        assert result == "default"
+
+    def test_bundle_fallback_when_all_missing(self):
+        """When all evidence missing bundle field, fallback to 'default'."""
+        from trenni.supervisor import _resolve_bundle_for_observations
+        
+        evidence = [
+            {"tool_name": "test1"},  # No bundle
+            {"tool_name": "test2"},  # No bundle
+        ]
+        
+        result = _resolve_bundle_for_observations(evidence)
+        assert result == "default"
+
+    def test_bundle_single_vote_wins(self):
+        """Single bundle entry wins (no tie-breaking needed)."""
+        from trenni.supervisor import _resolve_bundle_for_observations
+        
+        evidence = [
+            {"bundle": "factorio", "tool_name": "test"},
+        ]
+        
+        result = _resolve_bundle_for_observations(evidence)
+        assert result == "factorio"
+
+
+class TestOptimizerTriggerDataBundleRouting:
+    """Test that optimizer trigger_data uses correct bundle from evidence."""
+
+    @pytest.mark.asyncio
+    async def test_trigger_data_bundle_from_evidence(self, mock_config):
+        """Optimizer spawn uses bundle from observation evidence."""
+        from trenni.supervisor import Supervisor
+        from trenni.observation_aggregator import AggregationResult
+        from yoitsu_contracts.events import TriggerData
+        
+        # Create supervisor instance (minimal setup)
+        supervisor = Supervisor.__new__(Supervisor)
+        supervisor.config = mock_config
+        supervisor._processed_observation_ids_order = []
+        supervisor._processed_observation_ids_set = set()
+        supervisor._max_processed_observation_ids = 1000
+        
+        # Create mock aggregation result with factorio evidence
+        result = AggregationResult(
+            metric_type="tool_repetition",
+            count=10,
+            threshold=5.0,
+            exceeded=True,
+            evidence=[
+                {"bundle": "factorio", "tool_name": "factorio_call_script(find_ore_basic)", 
+                 "arg_pattern": "find_ore_basic", "call_count": 10, "similarity": 0.8},
+            ] * 5,  # 5 evidence entries, all factorio
+        )
+        
+        new_ids = ["evt-1", "evt-2", "evt-3"]
+        
+        # Mock _process_trigger to capture trigger_data
+        captured_trigger = None
+        async def mock_process_trigger(event, data, replay=False):
+            nonlocal captured_trigger
+            captured_trigger = data
+        
+        supervisor._process_trigger = mock_process_trigger
+        
+        # Run the observation aggregation logic (simulate)
+        # This is extracted from _aggregate_observations_periodically
+        import hashlib
+        import json
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        
+        batch_hash = hashlib.md5(json.dumps(sorted(new_ids)).encode()).hexdigest()[:8]
+        
+        from trenni.supervisor import _resolve_bundle_for_observations
+        target_bundle = _resolve_bundle_for_observations(result.evidence)
+        
+        trigger_data = {
+            "goal": f"Analyze {result.metric_type} pattern in bundle '{target_bundle}'",
+            "role": "optimizer",
+            "bundle": target_bundle,
+            "budget": 0.5,
+            "params": {
+                "metric_type": result.metric_type,
+                "observation_count": result.count,
+                "window_hours": 24,
+                "evidence": result.evidence,
+            },
+        }
+        
+        # Validate as TriggerData
+        data = TriggerData.model_validate(trigger_data)
+        
+        assert data.bundle == "factorio"
+        assert data.params.get("evidence") == result.evidence
+        assert len(data.params.get("evidence", [])) == 5
+        assert "factorio" in data.goal

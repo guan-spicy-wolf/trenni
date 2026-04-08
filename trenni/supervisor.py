@@ -1511,16 +1511,25 @@ class Supervisor:
                 # This ensures: same batch = same id (no duplicate), new batch = new id (new job)
                 batch_hash = hashlib.md5(json.dumps(sorted(new_ids)).encode()).hexdigest()[:8]
                 
+                # Resolve target bundle from evidence (per plan Task 1)
+                target_bundle = _resolve_bundle_for_observations(r.evidence)
+                
                 # Construct TriggerData for optimizer
+                # Per plan Task 1: route by observation bundle, pass evidence to optimizer
                 trigger_data = {
-                    "goal": f"Analyze {r.metric_type} pattern ({r.count} occurrences in {self.config.observation_window_hours}h window). Output a ReviewProposal JSON in your summary with executable_proposal for improvement.",
+                    "goal": (
+                        f"Analyze {r.metric_type} pattern in bundle '{target_bundle}' "
+                        f"({r.count} occurrences in {self.config.observation_window_hours}h window). "
+                        "Output a ReviewProposal JSON in your summary."
+                    ),
                     "role": "optimizer",
-                    "bundle": "default",  # Per Bundle MVP: optimizer uses default bundle
+                    "bundle": target_bundle,
                     "budget": 0.5,
                     "params": {
                         "metric_type": r.metric_type,
                         "observation_count": r.count,
                         "window_hours": self.config.observation_window_hours,
+                        "evidence": r.evidence,  # Pass evidence to optimizer
                     },
                 }
                 
@@ -1566,3 +1575,25 @@ class Supervisor:
             running=self.running,
             paused=self.paused,
         )
+
+
+def _resolve_bundle_for_observations(evidence: list[dict]) -> str:
+    """Resolve target bundle from observation evidence.
+    
+    Per plan Task 1: use the bundle field from observation events to route
+    optimizer spawn to the correct bundle. Takes the most common bundle
+    from evidence (majority vote).
+    
+    Args:
+        evidence: List of observation event payloads with 'bundle' field.
+        
+    Returns:
+        Bundle name to use for optimizer spawn, or 'default' if no evidence.
+    """
+    from collections import Counter
+    
+    bundles = [e.get("bundle", "") for e in evidence if e.get("bundle")]
+    if not bundles:
+        logger.warning("Observation evidence missing bundle field; falling back to 'default'")
+        return "default"
+    return Counter(bundles).most_common(1)[0][0]

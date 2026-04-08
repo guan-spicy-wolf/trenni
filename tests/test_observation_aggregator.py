@@ -234,6 +234,7 @@ def test_aggregation_result_dataclass():
         count=10,
         threshold=5.0,
         exceeded=True,
+        evidence=[{"bundle": "factorio", "tool_name": "test_tool"}],
         role="worker",
     )
     
@@ -241,6 +242,7 @@ def test_aggregation_result_dataclass():
     assert result.count == 10
     assert result.threshold == 5.0
     assert result.exceeded is True
+    assert result.evidence == [{"bundle": "factorio", "tool_name": "test_tool"}]
     assert result.role == "worker"
     
     result2 = AggregationResult(
@@ -248,8 +250,10 @@ def test_aggregation_result_dataclass():
         count=3,
         threshold=5.0,
         exceeded=False,
+        evidence=[],
     )
     assert not result2.exceeded
+    assert result2.evidence == []
 
 
 @pytest.mark.asyncio
@@ -422,3 +426,120 @@ async def test_window_count_semantics_for_threshold():
     assert results2[0].count == 6
     assert results2[0].exceeded
     assert set(new_ids2) == {"evt-4", "evt-5", "evt-6"}
+
+@pytest.mark.asyncio
+async def test_evidence_extraction_from_events():
+    """AggregationResult includes evidence payloads from observation events.
+    
+    Per plan Task 1.1: extract latest 5 events with tool_name, arg_pattern, bundle.
+    """
+    now = datetime.now(timezone.utc)
+    events = [
+        {
+            "id": f"evt-{i}",
+            "type": "observation.tool_repetition",
+            "ts": (now - timedelta(minutes=i)).isoformat(),
+            "data": {
+                "role": "worker",
+                "bundle": "factorio",
+                "tool_name": "factorio_call_script(find_ore_basic)",
+                "call_count": 5 + i,
+                "arg_pattern": "find_ore_basic",
+                "similarity": 0.8,
+            },
+        }
+        for i in range(1, 8)  # 7 events
+    ]
+    
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=make_response(events))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results, new_ids = await aggregate_observations(
+            "http://localhost:8000",
+            window_hours=24,
+            thresholds={"tool_repetition": 1.0},
+        )
+    
+    assert len(results) == 1
+    assert results[0].metric_type == "tool_repetition"
+    
+    # Evidence should be latest 5 (sorted by ts, newest first)
+    evidence = results[0].evidence
+    assert len(evidence) == 5
+    
+    # Latest event (evt-1) should be first
+    assert evidence[0]["bundle"] == "factorio"
+    assert evidence[0]["tool_name"] == "factorio_call_script(find_ore_basic)"
+    assert evidence[0]["arg_pattern"] == "find_ore_basic"
+    assert evidence[0]["call_count"] == 6  # 5 + 1
+    assert evidence[0]["similarity"] == 0.8
+    
+    # All evidence should have bundle=factorio
+    for e in evidence:
+        assert e["bundle"] == "factorio"
+        assert "tool_name" in e
+        assert "arg_pattern" in e
+
+
+@pytest.mark.asyncio
+async def test_evidence_empty_when_no_events():
+    """Evidence is empty list when no observation events.
+    
+    Per plan Task 1.5: evidence empty leads to bundle fallback.
+    """
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=make_response([]))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results, new_ids = await aggregate_observations(
+            "http://localhost:8000",
+            window_hours=24,
+            thresholds={"tool_repetition": 1.0},
+        )
+    
+    assert len(results) == 0
+    assert len(new_ids) == 0
+
+
+@pytest.mark.asyncio
+async def test_evidence_missing_bundle_field():
+    """Events without bundle field are included but have empty bundle.
+    
+    Per plan: _resolve_bundle_for_observations handles missing bundle.
+    """
+    now = datetime.now(timezone.utc)
+    events = [
+        {
+            "id": "evt-1",
+            "type": "observation.tool_repetition",
+            "ts": now.isoformat(),
+            "data": {
+                "role": "worker",
+                # bundle field missing
+                "tool_name": "test_tool",
+                "call_count": 10,
+            },
+        },
+    ]
+    
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=make_response(events))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        results, new_ids = await aggregate_observations(
+            "http://localhost:8000",
+            window_hours=24,
+            thresholds={"tool_repetition": 1.0},
+        )
+    
+    assert len(results) == 1
+    evidence = results[0].evidence
+    assert len(evidence) == 1
+    assert evidence[0].get("bundle") == ""  # Missing bundle = empty string

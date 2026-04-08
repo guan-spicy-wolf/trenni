@@ -29,6 +29,7 @@ class AggregationResult:
     count: int  # Window-wide count (ALL events in window, for threshold)
     threshold: float
     exceeded: bool
+    evidence: list[dict]  # NEW: list of observation event payloads (latest N)
     role: str | None = None
 
 
@@ -109,15 +110,37 @@ async def aggregate_observations(
         metric = event_type.split(".", 1)[1] if "." in event_type else ""
         counts[metric] = counts.get(metric, 0) + 1
     
-    # Build results with window-wide counts
+    # Build results with window-wide counts AND evidence payloads
+    # Per plan Task 1: extract latest 5 events per metric for optimizer spawn
     results = []
     for metric, count in counts.items():
         threshold = thresholds.get(metric, float("inf"))
+        
+        # Extract evidence events for this metric (latest 5)
+        metric_events = [
+            evt for evt in all_events
+            if evt.get("type", "").endswith(metric)
+        ]
+        # Sort by timestamp (newest first), take latest 5
+        metric_events.sort(key=lambda e: e.get("ts", ""), reverse=True)
+        evidence = [
+            {
+                "role": evt.get("data", {}).get("role", ""),
+                "bundle": evt.get("data", {}).get("bundle", ""),
+                "tool_name": evt.get("data", {}).get("tool_name", ""),
+                "call_count": evt.get("data", {}).get("call_count", 0),
+                "arg_pattern": evt.get("data", {}).get("arg_pattern", ""),
+                "similarity": evt.get("data", {}).get("similarity", 0.0),
+            }
+            for evt in metric_events[:5]
+        ]
+        
         results.append(AggregationResult(
             metric_type=metric,
             count=count,  # Window-wide total (for threshold)
             threshold=threshold,
             exceeded=(count >= threshold),
+            evidence=evidence,  # Latest 5 evidence payloads
         ))
     
     # Compute new_ids (events NOT yet processed) - for dedup/spawn control
