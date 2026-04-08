@@ -221,6 +221,61 @@ async def test_podman_backend_create_start_inspect_remove():
 
 
 @pytest.mark.asyncio
+async def test_podman_backend_create_passes_rw_mount_flags():
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/libpod/containers/create"):
+            seen_payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(201, json={"Id": "ctr-rw"})
+        if request.url.path.endswith("/libpod/containers/ctr-rw"):
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///tmp/podman.sock",
+        pod_name="yoitsu-dev",
+        image="localhost/yoitsu-palimpsest-job:dev",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={},
+        env_allowlist=(),
+        git_token_env="GITHUB_TOKEN",
+    )
+    backend = PodmanBackend(defaults, transport=httpx.MockTransport(handler))
+    spec = JobRuntimeSpec(
+        job_id="job-rw",
+        source_event_id="evt-rw",
+        container_name="yoitsu-job-job-rw",
+        image="localhost/yoitsu-palimpsest-job:dev",
+        pod_name="yoitsu-dev",
+        labels={},
+        env={},
+        command=("palimpsest", "container-entrypoint"),
+        config_payload_b64="abc",
+        volume_mounts=(
+            ("/host/evo", "/opt/yoitsu/palimpsest/evo", False),
+            ("/host/mod/scripts", "/host/mod/scripts", True),
+        ),
+    )
+
+    handle = await backend.create(spec)
+    await backend.remove(handle)
+    await backend.close()
+
+    mounts = seen_payloads[0]["mounts"]
+    assert mounts[0]["Source"] == "/host/evo"
+    assert mounts[0]["Destination"] == "/opt/yoitsu/palimpsest/evo"
+    assert mounts[0]["RW"] is False
+    assert mounts[1]["Source"] == "/host/mod/scripts"
+    assert mounts[1]["Destination"] == "/host/mod/scripts"
+    assert mounts[1]["RW"] is True
+
+
+@pytest.mark.asyncio
 async def test_podman_backend_inspect_missing_container():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/libpod/containers/ctr-404/json"):

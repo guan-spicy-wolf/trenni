@@ -212,3 +212,54 @@ def test_runtime_spec_builder_unknown_bundle_uses_defaults():
     assert spec.image == "localhost/default-image:latest"
     assert spec.pod_name == "default-pod"
     assert spec.extra_networks == ()
+
+
+def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: pytest.MonkeyPatch):
+    """Factorio jobs should mount the host mod scripts dir read-write into the job container."""
+    mod_scripts_dir = "/home/holo/factorio/mods/factorio-agent_0.1.0/scripts"
+    monkeypatch.setenv("FACTORIO_MOD_SCRIPTS_DIR", mod_scripts_dir)
+
+    config = TrenniConfig(
+        runtime=TrenniConfig.__dataclass_fields__['runtime'].default_factory(),
+        evo_root="/workspace/evo",
+        evo_root_host="/home/holo/yoitsu/evo",
+        bundles={
+            "factorio": BundleConfig(
+                runtime=BundleRuntimeConfig(
+                    env_allowlist=["FACTORIO_MOD_SCRIPTS_DIR"],
+                ),
+                scheduling=BundleSchedulingConfig(),
+            ),
+        },
+    )
+
+    defaults = RuntimeDefaults(
+        kind="podman",
+        socket_uri="unix:///run/podman/podman.sock",
+        pod_name="default-pod",
+        image="localhost/default-image:latest",
+        pull_policy="never",
+        stop_grace_seconds=10,
+        cleanup_timeout_seconds=120,
+        retain_on_failure=False,
+        labels={},
+        env_allowlist=("FACTORIO_MOD_SCRIPTS_DIR",),
+        git_token_env="GITHUB_TOKEN",
+    )
+
+    builder = RuntimeSpecBuilder(config, defaults)
+
+    spec = builder.build(
+        job_id="factorio-worker-1",
+        source_event_id="evt-factorio",
+        goal="mine iron",
+        role="worker",
+        bundle="factorio",
+        repo="",
+        init_branch="main",
+        evo_sha=None,
+    )
+
+    assert ("/home/holo/yoitsu/evo", "/opt/yoitsu/palimpsest/evo", False) in spec.volume_mounts
+    assert (mod_scripts_dir, mod_scripts_dir, True) in spec.volume_mounts
+    assert spec.env["FACTORIO_MOD_SCRIPTS_DIR"] == mod_scripts_dir

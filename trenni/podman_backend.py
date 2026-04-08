@@ -62,10 +62,10 @@ class PodmanBackend:
                     "Type": "bind",
                     "Source": host_path,
                     "Destination": container_path,
-                    "RW": False,
+                    "RW": rw,
                     "Options": ["Z"],  # SELinux private label for container access
                 }
-                for host_path, container_path in spec.volume_mounts
+                for host_path, container_path, rw in spec.volume_mounts
             ]
 
         response = await self._request("POST", "/libpod/containers/create", json=payload)

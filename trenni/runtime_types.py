@@ -31,7 +31,7 @@ class JobRuntimeSpec:
     command: tuple[str, ...]
     config_payload_b64: str
     extra_networks: tuple[str, ...] = ()  # Additional networks to attach
-    volume_mounts: tuple[tuple[str, str], ...] = ()  # (host_path, container_path) pairs
+    volume_mounts: tuple[tuple[str, str, bool], ...] = ()  # (host_path, container_path, rw) triples
 
 
 @dataclass

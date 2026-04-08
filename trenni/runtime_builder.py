@@ -166,12 +166,20 @@ class RuntimeSpecBuilder:
         env.update(build_git_auth_env(self.defaults.git_token_env))
 
         # Determine volume mounts
-        volume_mounts: list[tuple[str, str]] = []
-        
+        volume_mounts: list[tuple[str, str, bool]] = []
+
         # Mount evo directory if evo_root is configured
         # Use evo_root_host for the host path (required for volume mounts from within container)
         if self.config.evo_root and self.config.evo_root_host:
-            volume_mounts.append((self.config.evo_root_host, "/opt/yoitsu/palimpsest/evo"))
+            volume_mounts.append((self.config.evo_root_host, "/opt/yoitsu/palimpsest/evo", False))
+
+        # Factorio worker preparation syncs scripts into the live mod scripts directory.
+        # When the path is passed only as an env var, writes would stay inside the job
+        # container's private filesystem. Bind-mount the host path read-write so syncs
+        # actually update the live Factorio mod scripts directory.
+        mod_scripts_dir = env.get("FACTORIO_MOD_SCRIPTS_DIR", "")
+        if mod_scripts_dir:
+            volume_mounts.append((mod_scripts_dir, mod_scripts_dir, True))
 
         return JobRuntimeSpec(
             job_id=job_id,
