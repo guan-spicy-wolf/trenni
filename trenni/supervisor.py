@@ -1429,8 +1429,9 @@ class Supervisor:
             trigger_data["bundle"] = job.bundle
 
         # Create synthetic event for _process_trigger
+        proposal_source_event_id = f"{event.id}-proposal"
         synthetic_event = SimpleNamespace(
-            id=f"{job_id}-proposal",
+            id=proposal_source_event_id,
             source_id=self.config.source_id,
             type="trigger.review_proposal",
             data=trigger_data,

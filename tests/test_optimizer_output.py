@@ -274,6 +274,145 @@ Here is my proposal:
         # Should spawn task
         assert supervisor.client.emit.called
 
+    @pytest.mark.asyncio
+    async def test_optimizer_proposal_spawns_distinct_task_and_job_ids(self):
+        """Proposal trigger should not reuse the optimizer task/job ids."""
+        from trenni.supervisor import Supervisor
+        from trenni.config import TrenniConfig
+
+        config = TrenniConfig()
+        supervisor = Supervisor(config)
+        supervisor.client = AsyncMock()
+
+        optimizer_task_id = "9a77a7b31508b8ef"
+        optimizer_job_id = f"{optimizer_task_id}-root"
+        job = SpawnedJob(
+            job_id=optimizer_job_id,
+            source_event_id="obs-agg-tool_repetition-62bb6101",
+            goal="Analyze tool repetition",
+            role="optimizer",
+            repo="",
+            init_branch="main",
+            evo_sha="",
+            budget=0.5,
+            task_id=optimizer_task_id,
+            bundle="factorio",
+        )
+        supervisor.state.jobs_by_id[optimizer_job_id] = job
+        supervisor.state.tasks[optimizer_task_id] = MagicMock(
+            task_id=optimizer_task_id,
+            bundle="factorio",
+            job_order=[optimizer_job_id],
+            terminal=False,
+            eval_spawned=False,
+            state="running",
+        )
+
+        proposal = ReviewProposal(
+            problem_classification=ProblemClassification(
+                category=ProblemCategory.OTHER,
+                severity=SeverityLevel.MEDIUM,
+                summary="Repeated tool usage",
+            ),
+            executable_proposal=ExecutableProposal(
+                action_type=ActionType.IMPROVE_TOOL,
+                description="Create area scan tool",
+                estimated_impact="Reduce steps",
+            ),
+            task_template=TaskTemplate(
+                goal="在 factorio/scripts/ 下创建 area_scan_resources.lua",
+                role="implementer",
+                bundle="factorio",
+                budget=1.5,
+            ),
+        )
+
+        completion_event = SimpleNamespace(
+            id="069d6591-8cf8-7fb4-8000-eea678d5e9ce",
+            type="agent.job.completed",
+            data={"summary": proposal.model_dump_json(), "cost": 0.0},
+            ts=datetime.now(timezone.utc),
+        )
+
+        await supervisor._handle_optimizer_output(optimizer_job_id, job, completion_event)
+
+        implementer_jobs = [
+            j for j in supervisor.state.jobs_by_id.values()
+            if j.role == "implementer"
+        ]
+        assert len(implementer_jobs) == 1
+        implementer_job = implementer_jobs[0]
+        assert implementer_job.task_id != optimizer_task_id
+        assert implementer_job.job_id != optimizer_job_id
+
+    @pytest.mark.asyncio
+    async def test_optimizer_proposal_source_event_id_uses_completion_event_id(self):
+        """Proposal lineage should be derived from the completion event id."""
+        from trenni.supervisor import Supervisor
+        from trenni.config import TrenniConfig
+
+        config = TrenniConfig()
+        supervisor = Supervisor(config)
+        supervisor.client = AsyncMock()
+
+        optimizer_task_id = "9a77a7b31508b8ef"
+        optimizer_job_id = f"{optimizer_task_id}-root"
+        job = SpawnedJob(
+            job_id=optimizer_job_id,
+            source_event_id="obs-agg-tool_repetition-62bb6101",
+            goal="Analyze tool repetition",
+            role="optimizer",
+            repo="",
+            init_branch="main",
+            evo_sha="",
+            budget=0.5,
+            task_id=optimizer_task_id,
+            bundle="factorio",
+        )
+        supervisor.state.jobs_by_id[optimizer_job_id] = job
+        supervisor.state.tasks[optimizer_task_id] = MagicMock(
+            task_id=optimizer_task_id,
+            bundle="factorio",
+            job_order=[optimizer_job_id],
+            terminal=False,
+            eval_spawned=False,
+            state="running",
+        )
+
+        proposal = ReviewProposal(
+            problem_classification=ProblemClassification(
+                category=ProblemCategory.OTHER,
+                severity=SeverityLevel.MEDIUM,
+                summary="Repeated tool usage",
+            ),
+            executable_proposal=ExecutableProposal(
+                action_type=ActionType.IMPROVE_TOOL,
+                description="Create area scan tool",
+                estimated_impact="Reduce steps",
+            ),
+            task_template=TaskTemplate(
+                goal="在 factorio/scripts/ 下创建 area_scan_resources.lua",
+                role="implementer",
+                bundle="factorio",
+                budget=1.5,
+            ),
+        )
+
+        completion_event = SimpleNamespace(
+            id="evt-optimizer-complete-123",
+            type="agent.job.completed",
+            data={"summary": proposal.model_dump_json(), "cost": 0.0},
+            ts=datetime.now(timezone.utc),
+        )
+
+        await supervisor._handle_optimizer_output(optimizer_job_id, job, completion_event)
+
+        implementer_job = next(
+            j for j in supervisor.state.jobs_by_id.values()
+            if j.role == "implementer"
+        )
+        assert implementer_job.source_event_id == "evt-optimizer-complete-123-proposal"
+
 
 class TestReviewProposalTriggerConversion:
     """Test review_proposal_to_trigger produces valid TriggerData."""
