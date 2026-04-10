@@ -70,6 +70,29 @@ class BundleRuntimeConfig:
 
 
 @dataclass
+class BundleSourceConfig:
+    """Bundle source configuration in Trenni registry.
+
+    Declares where the bundle repo is and which branch/tag to track.
+    Trenni resolves selector to a specific commit SHA at job dispatch time.
+
+    Attributes:
+        url: Bundle repo URI (git+file://, git+ssh://, git+https://)
+        selector: Branch or tag name to track (e.g., "evolve", "main", "v1.2.3")
+    """
+    url: str = ""
+    selector: str = "main"
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "BundleSourceConfig":
+        payload = data or {}
+        return cls(
+            url=payload.get("url", ""),
+            selector=payload.get("selector", "main"),
+        )
+
+
+@dataclass
 class BundleSchedulingConfig:
     max_concurrent_jobs: int = 0  # 0 = unlimited
 
@@ -81,13 +104,22 @@ class BundleSchedulingConfig:
 
 @dataclass
 class BundleConfig:
+    """Complete bundle configuration in Trenni registry.
+
+    Attributes:
+        source: Where the bundle repo is and which ref to track
+        runtime: Container runtime settings for jobs using this bundle
+        scheduling: Concurrency and scheduling settings
+    """
+    source: BundleSourceConfig = field(default_factory=BundleSourceConfig)
     runtime: BundleRuntimeConfig = field(default_factory=BundleRuntimeConfig)
     scheduling: BundleSchedulingConfig = field(default_factory=BundleSchedulingConfig)
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "bundle_config":
+    def from_dict(cls, data: dict | None) -> "BundleConfig":
         payload = data or {}
         return cls(
+            source=BundleSourceConfig.from_dict(payload.get("source")),
             runtime=BundleRuntimeConfig.from_dict(payload.get("runtime")),
             scheduling=BundleSchedulingConfig.from_dict(payload.get("scheduling")),
         )
