@@ -660,6 +660,10 @@ class Supervisor:
         # ADR-0010 D5: Emit budget_variance observation for completed jobs
         if not replay and not is_failure and not is_cancelled:
             await self._emit_budget_variance(job_id, event)
+        
+        # ADR-0017: Run observation analyzers after job terminal
+        if not replay:
+            await self._run_observation_analyzers(job_id, event, job_record)
 
         # ADR-0010: Handle optimizer output - parse ReviewProposal and spawn optimization task
         if not replay and not is_failure and not is_cancelled:
@@ -1426,6 +1430,62 @@ class Supervisor:
                     analyzer_version=analyzer_version_dict,
                 ).model_dump(),
             )
+
+    async def _run_observation_analyzers(
+        self,
+        job_id: str,
+        event: Event,
+        job: SpawnedJob | None,
+    ) -> None:
+        """Run observation analyzers after job terminal (ADR-0017).
+        
+        Per ADR-0017: Trenni runs registered analyzers on job events,
+        then emits observation.* events from the returned data.
+        """
+        from .observation_analyzers import get_analyzer, BUILTIN_ANALYZERS
+        from yoitsu_contracts.observation import ObservationToolRepetitionEvent, OBSERVATION_TOOL_REPETITION
+        
+        if job is None:
+            return
+        
+        task_id = job.task_id or job_id
+        role = job.role
+        bundle = job.bundle
+        
+        # Build analyzer_version from job
+        analyzer_version_dict = {}
+        if job.analyzer_version:
+            analyzer_version_dict = job.analyzer_version.model_dump(mode="json")
+        
+        # For now, just run tool_repetition analyzer on the completed event
+        # In full implementation, would query pasloe for all job events
+        job_events = [event]  # Simplified: only the terminal event
+        
+        analyzer = get_analyzer("tool_repetition")
+        if analyzer:
+            try:
+                observations = analyzer.analyze(job_events, job_id, task_id, role, bundle)
+                
+                # Emit observation events
+                for obs in observations:
+                    await self.client.emit(
+                        OBSERVATION_TOOL_REPETITION,
+                        ObservationToolRepetitionEvent(
+                            job_id=job_id,
+                            task_id=task_id,
+                            role=role,
+                            bundle=bundle,
+                            tool_name=obs.get("tool_name", ""),
+                            call_count=obs.get("call_count", 0),
+                            arg_pattern=obs.get("arg_pattern", ""),
+                            similarity=obs.get("similarity", 0.0),
+                            analyzer_version_bundle_sha=analyzer_version_dict.get("bundle_sha", ""),
+                            analyzer_version_trenni_sha=analyzer_version_dict.get("trenni_sha", ""),
+                            analyzer_version_palimpsest_sha=analyzer_version_dict.get("palimpsest_sha", ""),
+                        ).model_dump(),
+                    )
+            except Exception as e:
+                logger.warning("Observation analyzer %s failed for job %s: %s", analyzer.name, job_id, e)
 
     async def _handle_optimizer_output(
         self,
