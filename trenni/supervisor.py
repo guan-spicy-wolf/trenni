@@ -1526,7 +1526,7 @@ class Supervisor:
         # Get API key from environment
         api_key = os.environ.get(self.config.pasloe_api_key_env, "")
         
-        results, new_ids = await aggregate_observations(
+        results, metric_new_ids = await aggregate_observations(
             self.config.pasloe_url,
             self.config.observation_window_hours,
             self.config.observation_thresholds,
@@ -1541,87 +1541,89 @@ class Supervisor:
         successfully_processed_ids: set[str] = set()
         
         for r in results:
-            if r.exceeded and new_ids:
-                # Per ADR-0017: per-metric batch, not global new_ids
-                # Get observation events for this specific metric
-                metric_new_ids = [id for id in new_ids if id not in self._processed_observation_ids_set]
-                if not metric_new_ids:
-                    continue  # Already processed by previous metric trigger
+            if not r.exceeded:
+                continue  # Threshold not exceeded
+            
+            # Per ADR-0017: per-metric batch, not global new_ids
+            # Get observation events for THIS specific metric only
+            batch_ids = metric_new_ids.get(r.metric_type, [])
+            if not batch_ids:
+                continue  # No new events for this metric
+            
+            logger.info(
+                f"Observation threshold exceeded: {r.metric_type} "
+                f"(window_total={r.count} >= threshold={r.threshold}, new_events={len(batch_ids)})"
+            )
+            
+            # Per-metric batch hash for idempotency
+            batch_hash = hashlib.md5(json.dumps(sorted(batch_ids)).encode()).hexdigest()[:8]
+            
+            # Resolve target bundle from evidence
+            target_bundle = _resolve_bundle_for_observations(r.evidence)
+            
+            # Construct TriggerData for optimizer
+            trigger_data = {
+                "goal": (
+                    f"Analyze {r.metric_type} pattern in bundle '{target_bundle}' "
+                    f"({r.count} occurrences in {self.config.observation_window_hours}h window). "
+                    "Output a ReviewProposal JSON in your summary."
+                ),
+                "role": "optimizer",
+                "bundle": target_bundle,
+                "budget": 0.5,
+                "params": {
+                    "metric_type": r.metric_type,
+                    "observation_count": r.count,
+                    "window_hours": self.config.observation_window_hours,
+                    "evidence": r.evidence,
+                    "triggered_by": list(batch_ids),  # Per-metric batch
+                },
+            }
+            
+            # Create synthetic event
+            synthetic_event = SimpleNamespace(
+                id=f"obs-agg-{r.metric_type}-{batch_hash}",
+                source_id="observation_aggregator",
+                type="trigger",
+                ts=datetime.now(timezone.utc),
+                data=trigger_data,
+            )
+            
+            # Compute task_id for consumed event
+            task_id = self._root_task_id(synthetic_event.id)
+            
+            # Validate and process trigger (creates Review Task)
+            try:
+                data = TriggerData.model_validate(trigger_data)
+            except Exception as e:
+                logger.warning(
+                    "Aggregated observation trigger failed TriggerData validation: %s",
+                    e,
+                )
+                continue  # Skip this metric, IDs remain "new" for next round
+            
+            try:
+                await self._process_trigger(synthetic_event, data, replay=False)
                 
-                logger.info(
-                    f"Observation threshold exceeded: {r.metric_type} "
-                    f"(window_total={r.count} >= threshold={r.threshold}, new_events={len(metric_new_ids)})"
+                # ADR-0017 §2h: emit observation.consumed AFTER Task creation
+                await self.client.emit(
+                    OBSERVATION_CONSUMED,
+                    ObservationConsumedData(
+                        batch_members=list(batch_ids),  # Per-metric
+                        trigger_task_id=task_id,
+                        bundle=target_bundle,
+                        metric_type=r.metric_type,
+                    ).model_dump(mode="json"),
+                    idempotency_key=f"obs-consumed-{r.metric_type}-{batch_hash}",  # Per-metric key
                 )
                 
-                # Per-metric batch hash for idempotency
-                batch_hash = hashlib.md5(json.dumps(sorted(metric_new_ids)).encode()).hexdigest()[:8]
-                
-                # Resolve target bundle from evidence
-                target_bundle = _resolve_bundle_for_observations(r.evidence)
-                
-                # Construct TriggerData for optimizer
-                trigger_data = {
-                    "goal": (
-                        f"Analyze {r.metric_type} pattern in bundle '{target_bundle}' "
-                        f"({r.count} occurrences in {self.config.observation_window_hours}h window). "
-                        "Output a ReviewProposal JSON in your summary."
-                    ),
-                    "role": "optimizer",
-                    "bundle": target_bundle,
-                    "budget": 0.5,
-                    "params": {
-                        "metric_type": r.metric_type,
-                        "observation_count": r.count,
-                        "window_hours": self.config.observation_window_hours,
-                        "evidence": r.evidence,
-                        "triggered_by": list(metric_new_ids),  # Per-metric batch
-                    },
-                }
-                
-                # Create synthetic event
-                synthetic_event = SimpleNamespace(
-                    id=f"obs-agg-{r.metric_type}-{batch_hash}",
-                    source_id="observation_aggregator",
-                    type="trigger",
-                    ts=datetime.now(timezone.utc),
-                    data=trigger_data,
-                )
-                
-                # Compute task_id for consumed event
-                task_id = self._root_task_id(synthetic_event.id)
-                
-                # Validate and process trigger (creates Review Task)
-                try:
-                    data = TriggerData.model_validate(trigger_data)
-                except Exception as e:
-                    logger.warning(
-                        "Aggregated observation trigger failed TriggerData validation: %s",
-                        e,
-                    )
-                    continue  # Skip this metric, IDs remain "new" for next round
-                
-                try:
-                    await self._process_trigger(synthetic_event, data, replay=False)
-                    
-                    # ADR-0017 §2h: emit observation.consumed AFTER Task creation
-                    await self.client.emit(
-                        OBSERVATION_CONSUMED,
-                        ObservationConsumedData(
-                            batch_members=list(metric_new_ids),  # Per-metric
-                            trigger_task_id=task_id,
-                            bundle=target_bundle,
-                            metric_type=r.metric_type,
-                        ).model_dump(mode="json"),
-                        idempotency_key=f"obs-consumed-{r.metric_type}-{batch_hash}",  # Per-metric key
-                    )
-                    
-                    # Only mark processed after both succeed
-                    successfully_processed_ids.update(metric_new_ids)
-                
-                except Exception as e:
-                    logger.exception(f"Failed to spawn optimizer for {r.metric_type}: {e}")
-                    # IDs remain "new" for next round - atomicity preserved
-                    continue
+                # Only mark processed after both succeed
+                successfully_processed_ids.update(batch_ids)
+            
+            except Exception as e:
+                logger.exception(f"Failed to spawn optimizer for {r.metric_type}: {e}")
+                # IDs remain "new" for next round - atomicity preserved
+                continue
         
         # Now mark all successfully processed IDs
         for id in successfully_processed_ids:

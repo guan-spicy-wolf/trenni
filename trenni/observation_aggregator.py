@@ -39,7 +39,7 @@ async def aggregate_observations(
     thresholds: dict[str, float],
     api_key: str = "",
     processed_ids: set[str] | None = None,
-) -> tuple[list[AggregationResult], list[str]]:
+) -> tuple[list[AggregationResult], dict[str, list[str]]]:
     """Query pasloe for observation.* events in window, aggregate by metric_type.
     
     Returns TWO things with distinct semantics:
@@ -48,10 +48,9 @@ async def aggregate_observations(
        - Used for threshold check ("5 occurrences in 24h window")
        - NOT affected by processed_ids filtering
        
-    2. new_ids: IDs of events NOT yet in processed_ids
-       - Used for dedup (hash-based synthetic event id)
-       - Used for spawn decision (only spawn if there are new events)
-       - Empty if all window events were already processed
+    2. metric_new_ids: Dict mapping metric_type to list of unprocessed event IDs
+       - Per-metric dedup (each metric gets its own batch_members)
+       - Used for spawn decision (only spawn if metric has new events)
     
     This separation is critical for correct threshold behavior:
     - If threshold=5, and events arrive: round1=3, round2=3
@@ -72,7 +71,7 @@ async def aggregate_observations(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     all_events = []  # ALL observation events in window (for count)
-    all_event_ids: list[str] = []  # ALL IDs in window
+    metric_event_ids: dict[str, list[str]] = {}  # metric_type -> event IDs
     cursor = None
     
     headers = {}
@@ -95,7 +94,10 @@ async def aggregate_observations(
                     all_events.append(evt)
                     event_id = evt.get("id", "")
                     if event_id:
-                        all_event_ids.append(event_id)
+                        event_type = evt.get("type", "")
+                        metric = event_type.split(".", 1)[1] if "." in event_type else ""
+                        if metric:
+                            metric_event_ids.setdefault(metric, []).append(event_id)
             
             cursor = resp.headers.get("X-Next-Cursor")
             if not cursor:
@@ -143,8 +145,13 @@ async def aggregate_observations(
             evidence=evidence,  # Latest 5 evidence payloads
         ))
     
-    # Compute new_ids (events NOT yet processed) - for dedup/spawn control
+    # Compute per-metric new_ids (events NOT yet processed)
+    # Each metric gets its own batch for triggered_by/batch_members
     processed_set = processed_ids or set()
-    new_ids = [id for id in all_event_ids if id not in processed_set]
+    metric_new_ids: dict[str, list[str]] = {}
+    for metric, ids in metric_event_ids.items():
+        unprocessed = [id for id in ids if id not in processed_set]
+        if unprocessed:
+            metric_new_ids[metric] = unprocessed
     
-    return results, new_ids
+    return results, metric_new_ids
