@@ -1075,9 +1075,8 @@ class Supervisor:
         )
 
     async def _cleanup_handle(self, handle: JobHandle, *, failed: bool) -> None:
-        # TODO: debug - skip cleanup for now
-        return
         if failed and self.runtime_defaults.retain_on_failure:
+            return
             return
         try:
             await self.backend.stop(handle, self.runtime_defaults.stop_grace_seconds)
@@ -1534,6 +1533,7 @@ class Supervisor:
                         "observation_count": r.count,
                         "window_hours": self.config.observation_window_hours,
                         "evidence": r.evidence,  # Pass evidence to optimizer
+                        "triggered_by": list(new_ids),  # ADR-0017: causal link for idempotency
                     },
                 }
                 
@@ -1559,6 +1559,22 @@ class Supervisor:
                     continue
                 
                 await self._process_trigger(synthetic_event, data, replay=False)
+                
+                # ADR-0017 §2h: emit observation.consumed AFTER Task creation
+                # Compute task_id (derived from event.id per _root_task_id)
+                task_id = self._root_task_id(synthetic_event.id)
+                
+                from yoitsu_contracts import OBSERVATION_CONSUMED, ObservationConsumedData
+                await self.client.emit(
+                    OBSERVATION_CONSUMED,
+                    ObservationConsumedData(
+                        batch_members=list(new_ids),
+                        trigger_task_id=task_id,
+                        bundle=target_bundle,
+                        metric_type=r.metric_type,
+                    ).model_dump(mode="json"),
+                    idempotency_key=f"obs-consumed-{batch_hash}",
+                )
 
     @staticmethod
     def _event_idempotency_key(*, source_event_id: str, event_type: str, entity_id: str) -> str | None:
