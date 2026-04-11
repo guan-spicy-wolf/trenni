@@ -1462,21 +1462,23 @@ class Supervisor:
     async def _aggregate_and_spawn_optimizer(self) -> None:
         """Aggregate observation events and spawn optimizer when thresholds exceeded.
         
-        Per ADR-0010 extension for Factorio Tool Evolution MVP:
-        Periodically queries pasloe for observation.* events, aggregates by metric_type,
-        and spawns optimizer tasks when thresholds are exceeded.
+        Per ADR-0010 extension + ADR-0017 §2h:
         
-        Deduplication strategy:
-        1. processed_ids tracks observation event IDs that have been aggregated
-        2. Each aggregation batch with new events gets a unique synthetic event id
-           (hash of new_ids), ensuring:
-           - Same observation batch won't trigger duplicate optimizer jobs
-           - New observation batch gets a new, independent job (won't reuse old job_id)
+        Flow: create Review Task first -> emit observation.consumed -> mark processed
+        
+        Atomicity guarantee:
+        - new_ids are only marked processed AFTER Task creation succeeds
+        - If _process_trigger or emit fails, these IDs remain "new" for next round
+        - Each metric gets its own batch_members (not global new_ids)
+        
+        Idempotency: triggered_by is used as the key. On replay:
+        - If Task exists: only emit observation.consumed (catch-up)
+        - If Task doesn't exist: recreate Task + emit consumed
         """
         import hashlib
         import os
-        import time
         from .observation_aggregator import aggregate_observations, AggregationResult
+        from yoitsu_contracts import OBSERVATION_CONSUMED, ObservationConsumedData
         
         # Get API key from environment
         api_key = os.environ.get(self.config.pasloe_api_key_env, "")
@@ -1489,36 +1491,32 @@ class Supervisor:
             processed_ids=self._processed_observation_ids_set,
         )
         
-        # Record processed observation IDs with ordered FIFO tracking
-        # Add new IDs to both list (for order) and set (for fast lookup)
-        for id in new_ids:
-            if id not in self._processed_observation_ids_set:
-                self._processed_observation_ids_order.append(id)
-                self._processed_observation_ids_set.add(id)
+        # DO NOT mark processed here - wait until Task creation succeeds
+        # This ensures atomicity: failed spawn doesn't "eat" observations
         
-        # Prune old IDs using true FIFO (remove oldest first)
-        while len(self._processed_observation_ids_order) > self._max_processed_observation_ids:
-            old_id = self._processed_observation_ids_order.pop(0)  # Remove oldest (FIFO)
-            self._processed_observation_ids_set.discard(old_id)
+        # Track which IDs were successfully processed in this round
+        successfully_processed_ids: set[str] = set()
         
         for r in results:
             if r.exceeded and new_ids:
-                # Spawn optimizer only when:
-                # 1. Window-wide count exceeds threshold
-                # 2. There are NEW events to process (dedup: don't re-spawn for same batch)
+                # Per ADR-0017: per-metric batch, not global new_ids
+                # Get observation events for this specific metric
+                metric_new_ids = [id for id in new_ids if id not in self._processed_observation_ids_set]
+                if not metric_new_ids:
+                    continue  # Already processed by previous metric trigger
+                
                 logger.info(
                     f"Observation threshold exceeded: {r.metric_type} "
-                    f"(window_total={r.count} >= threshold={r.threshold}, new_events={len(new_ids)})"
+                    f"(window_total={r.count} >= threshold={r.threshold}, new_events={len(metric_new_ids)})"
                 )
-                # Compute unique hash from new_ids for this aggregation batch
-                # This ensures: same batch = same id (no duplicate), new batch = new id (new job)
-                batch_hash = hashlib.md5(json.dumps(sorted(new_ids)).encode()).hexdigest()[:8]
                 
-                # Resolve target bundle from evidence (per plan Task 1)
+                # Per-metric batch hash for idempotency
+                batch_hash = hashlib.md5(json.dumps(sorted(metric_new_ids)).encode()).hexdigest()[:8]
+                
+                # Resolve target bundle from evidence
                 target_bundle = _resolve_bundle_for_observations(r.evidence)
                 
                 # Construct TriggerData for optimizer
-                # Per plan Task 1: route by observation bundle, pass evidence to optimizer
                 trigger_data = {
                     "goal": (
                         f"Analyze {r.metric_type} pattern in bundle '{target_bundle}' "
@@ -1532,14 +1530,12 @@ class Supervisor:
                         "metric_type": r.metric_type,
                         "observation_count": r.count,
                         "window_hours": self.config.observation_window_hours,
-                        "evidence": r.evidence,  # Pass evidence to optimizer
-                        "triggered_by": list(new_ids),  # ADR-0017: causal link for idempotency
+                        "evidence": r.evidence,
+                        "triggered_by": list(metric_new_ids),  # Per-metric batch
                     },
                 }
                 
-                # Create synthetic event with unique id per aggregation batch
-                # Hash ensures: same new_ids = same id (no duplicate spawn)
-                #              different new_ids = different id (new independent job)
+                # Create synthetic event
                 synthetic_event = SimpleNamespace(
                     id=f"obs-agg-{r.metric_type}-{batch_hash}",
                     source_id="observation_aggregator",
@@ -1548,7 +1544,10 @@ class Supervisor:
                     data=trigger_data,
                 )
                 
-                # Validate and process trigger
+                # Compute task_id for consumed event
+                task_id = self._root_task_id(synthetic_event.id)
+                
+                # Validate and process trigger (creates Review Task)
                 try:
                     data = TriggerData.model_validate(trigger_data)
                 except Exception as e:
@@ -1556,25 +1555,41 @@ class Supervisor:
                         "Aggregated observation trigger failed TriggerData validation: %s",
                         e,
                     )
+                    continue  # Skip this metric, IDs remain "new" for next round
+                
+                try:
+                    await self._process_trigger(synthetic_event, data, replay=False)
+                    
+                    # ADR-0017 §2h: emit observation.consumed AFTER Task creation
+                    await self.client.emit(
+                        OBSERVATION_CONSUMED,
+                        ObservationConsumedData(
+                            batch_members=list(metric_new_ids),  # Per-metric
+                            trigger_task_id=task_id,
+                            bundle=target_bundle,
+                            metric_type=r.metric_type,
+                        ).model_dump(mode="json"),
+                        idempotency_key=f"obs-consumed-{r.metric_type}-{batch_hash}",  # Per-metric key
+                    )
+                    
+                    # Only mark processed after both succeed
+                    successfully_processed_ids.update(metric_new_ids)
+                
+                except Exception as e:
+                    logger.exception(f"Failed to spawn optimizer for {r.metric_type}: {e}")
+                    # IDs remain "new" for next round - atomicity preserved
                     continue
-                
-                await self._process_trigger(synthetic_event, data, replay=False)
-                
-                # ADR-0017 §2h: emit observation.consumed AFTER Task creation
-                # Compute task_id (derived from event.id per _root_task_id)
-                task_id = self._root_task_id(synthetic_event.id)
-                
-                from yoitsu_contracts import OBSERVATION_CONSUMED, ObservationConsumedData
-                await self.client.emit(
-                    OBSERVATION_CONSUMED,
-                    ObservationConsumedData(
-                        batch_members=list(new_ids),
-                        trigger_task_id=task_id,
-                        bundle=target_bundle,
-                        metric_type=r.metric_type,
-                    ).model_dump(mode="json"),
-                    idempotency_key=f"obs-consumed-{batch_hash}",
-                )
+        
+        # Now mark all successfully processed IDs
+        for id in successfully_processed_ids:
+            if id not in self._processed_observation_ids_set:
+                self._processed_observation_ids_order.append(id)
+                self._processed_observation_ids_set.add(id)
+        
+        # Prune old IDs using true FIFO
+        while len(self._processed_observation_ids_order) > self._max_processed_observation_ids:
+            old_id = self._processed_observation_ids_order.pop(0)
+            self._processed_observation_ids_set.discard(old_id)
 
     @staticmethod
     def _event_idempotency_key(*, source_event_id: str, event_type: str, entity_id: str) -> str | None:
