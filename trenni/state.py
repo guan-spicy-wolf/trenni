@@ -6,7 +6,7 @@ from typing import Any
 
 from yoitsu_contracts.artifact import ArtifactBinding
 from yoitsu_contracts.conditions import Condition, condition_from_data
-from yoitsu_contracts.config import JobContextConfig
+from yoitsu_contracts.config import JobContextConfig, AnalyzerVersion
 from yoitsu_contracts.events import EvalSpec, TaskResult
 
 from .runtime_types import JobHandle
@@ -58,6 +58,7 @@ class SpawnedJob:
     parent_job_id: str = ""
     bundle: str = ""
     input_artifacts: list[ArtifactBinding] = field(default_factory=list)
+    analyzer_version: AnalyzerVersion | None = None  # ADR-0017: three-party SHA
 
     def to_enqueued_data(self, queue_state: str, condition_data: dict | None) -> dict[str, Any]:
         """Generate SupervisorJobEnqueuedData dict from this job."""
@@ -78,6 +79,7 @@ class SpawnedJob:
             "job_context": self.job_context.model_dump(mode="json"),
             "queue_state": queue_state,
             "input_artifacts": [b.model_dump(mode="json") for b in self.input_artifacts],
+            "analyzer_version": self.analyzer_version.model_dump(mode="json") if self.analyzer_version else None,
         }
 
     def to_launched_data(self, runtime_kind: str, container_id: str, container_name: str, condition_data: dict | None) -> dict[str, Any]:
@@ -100,6 +102,7 @@ class SpawnedJob:
             "parent_job_id": self.parent_job_id,
             "condition": condition_data,
             "input_artifacts": [b.model_dump(mode="json") for b in self.input_artifacts],
+            "analyzer_version": self.analyzer_version.model_dump(mode="json") if self.analyzer_version else None,
         }
 
     @classmethod
@@ -124,6 +127,7 @@ class SpawnedJob:
             parent_job_id=data.get("parent_job_id", ""),
             job_context=JobContextConfig.model_validate(data.get("job_context", {})),
             input_artifacts=input_artifacts,
+            analyzer_version=AnalyzerVersion.model_validate(data.get("analyzer_version")) if data.get("analyzer_version") else None,
         )
 
 

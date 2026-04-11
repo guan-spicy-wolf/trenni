@@ -17,7 +17,7 @@ from yoitsu_contracts.observation import (
     OBSERVATION_BUDGET_VARIANCE,
 )
 from yoitsu_contracts.conditions import condition_from_data, condition_to_data
-from yoitsu_contracts.config import EvalContextConfig, JobContextConfig, JoinContextConfig
+from yoitsu_contracts.config import EvalContextConfig, JobContextConfig, JoinContextConfig, AnalyzerVersion
 from yoitsu_contracts.events import (
     EvalSpec,
     JobCancelledData,
@@ -112,6 +112,36 @@ class Supervisor:
         # Using list + set to maintain insertion order while allowing fast lookup
         self._processed_observation_ids_order: list[str] = []
         self._processed_observation_ids_set: set[str] = set()
+        
+        # ADR-0017: Read analyzer version SHAs from environment variables
+        # These are constant for the supervisor's lifetime (not dynamic)
+        import os
+        from yoitsu_contracts import AnalyzerVersion
+        
+        trenni_sha = os.environ.get(config.trenni_sha_env, "")[:12]
+        palimpsest_sha = os.environ.get(config.palimpsest_sha_env, "")[:12]
+        bundle_sha = os.environ.get(config.bundle_sha_env, "")[:12]  # Global fallback
+        
+        if trenni_sha and palimpsest_sha and bundle_sha:
+            self._analyzer_version = AnalyzerVersion(
+                bundle_sha=bundle_sha,
+                trenni_sha=trenni_sha,
+                palimpsest_sha=palimpsest_sha,
+            )
+            logger.info(
+                "Analyzer version initialized: bundle=%s, trenni=%s, palimpsest=%s",
+                bundle_sha, trenni_sha, palimpsest_sha
+            )
+        else:
+            self._analyzer_version = None
+            logger.warning(
+                "Missing analyzer version SHAs: bundle=%s, trenni=%s, palimpsest=%s. "
+                "Set YOITSU_BUNDLE_SHA, YOITSU_TRENNI_SHA, YOITSU_PALIMPSEST_SHA env vars. "
+                "Observation events will have empty analyzer_version.",
+                bundle_sha or "<missing>",
+                trenni_sha or "<missing>",
+                palimpsest_sha or "<missing>"
+            )
         self._max_processed_observation_ids: int = 1000  # FIFO prune limit
 
     @property
@@ -298,6 +328,7 @@ class Supervisor:
             parent_job_id=job.parent_job_id,
             condition=job.condition,
             input_artifacts=job.input_artifacts,  # ADR-0013
+            analyzer_version=job.analyzer_version,  # ADR-0017
         )
 
     async def _poll_and_handle(self) -> None:
@@ -480,6 +511,7 @@ class Supervisor:
             task_id=task_id,
             bundle=bundle,
             input_artifacts=list(data.input_artifacts),  # ADR-0013
+            analyzer_version=self._analyzer_version,  # ADR-0017
         )
         budget_error = self._validate_spawned_job_budget(root_job)
         if budget_error:
@@ -998,6 +1030,7 @@ class Supervisor:
         bundle: str = "",
         role_params: dict[str, Any] | None = None,
         input_artifacts: list | None = None,  # ADR-0013
+        analyzer_version=None,  # ADR-0017: AnalyzerVersion
     ) -> None:
         """Launch a job in the isolation backend."""
         spec = self.runtime_builder.build(
@@ -1014,6 +1047,7 @@ class Supervisor:
             budget=budget,
             job_context=job_context,
             input_artifacts=input_artifacts,  # ADR-0013
+            analyzer_version=analyzer_version,  # ADR-0017
         )
 
         # Validate runtime environment before container creation
@@ -1042,6 +1076,7 @@ class Supervisor:
             condition=condition,
             job_context=job_context or self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None)).job_context,
             parent_job_id=parent_job_id,
+            analyzer_version=analyzer_version,  # ADR-0017
         )
         
         # ADR-0011 D5: Track running jobs per bundle for launch conditions
@@ -1224,6 +1259,7 @@ class Supervisor:
             condition=condition_from_data(data.get("condition")),
             parent_job_id=data.get("parent_job_id", ""),
             input_artifacts=input_artifacts,  # ADR-0013
+            analyzer_version=AnalyzerVersion.model_validate(data.get("analyzer_version")) if data.get("analyzer_version") else None,  # ADR-0017
         )
         self._spawn_defaults_by_job[job_id] = SpawnDefaults(
             repo=data.get("repo", ""),
@@ -1356,6 +1392,7 @@ class Supervisor:
         """Emit budget_variance observation after job completion (ADR-0010 D5).
         
         Uses spawn_defaults for estimated_budget and event.data for actual cost.
+        Uses job.analyzer_version for three-party SHA (ADR-0017).
         """
         spawn_defaults = self._spawn_defaults_by_job.get(job_id)
         if not spawn_defaults or spawn_defaults.budget <= 0:
@@ -1371,6 +1408,11 @@ class Supervisor:
         if estimated_budget > 0:
             variance_ratio = (actual_cost - estimated_budget) / estimated_budget
             
+            # Build analyzer_version dict (ADR-0017)
+            analyzer_version_dict = {}
+            if job.analyzer_version:
+                analyzer_version_dict = job.analyzer_version.model_dump(mode="json")
+            
             await self.client.emit(
                 OBSERVATION_BUDGET_VARIANCE,
                 ObservationBudgetVarianceData(
@@ -1381,6 +1423,7 @@ class Supervisor:
                     estimated_budget=estimated_budget,
                     actual_cost=actual_cost,
                     variance_ratio=variance_ratio,
+                    analyzer_version=analyzer_version_dict,
                 ).model_dump(),
             )
 

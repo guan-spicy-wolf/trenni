@@ -68,6 +68,7 @@ class RuntimeSpecBuilder:
         budget: float | None = None,
         job_context: JobContextConfig | None = None,
         input_artifacts: list[ArtifactBinding] | None = None,  # ADR-0013
+        analyzer_version=None,  # ADR-0017: AnalyzerVersion
     ) -> JobRuntimeSpec:
         """Build JobRuntimeSpec from task semantics and role-derived defaults."""
         # Workspace: use defaults + repo/init_branch/input_artifacts from spawn
@@ -109,6 +110,7 @@ class RuntimeSpecBuilder:
                     source_id=self.config.default_eventstore_source,
                 ).model_dump(mode="json"),
                 "context": (job_context or JobContextConfig()).model_dump(mode="json", exclude_none=True),
+                "analyzer_version": analyzer_version.model_dump(mode="json") if analyzer_version else None,
             }
         )
 

@@ -173,6 +173,11 @@ class TrenniConfig:
         "tool_repetition": 5.0,  # Absolute count, not ratio
         "context_late_lookup": 3.0,
     })
+    
+    # ADR-0017: Analyzer version env vars
+    trenni_sha_env: str = "YOITSU_TRENNI_SHA"
+    palimpsest_sha_env: str = "YOITSU_PALIMPSEST_SHA"
+    bundle_sha_env: str = "YOITSU_BUNDLE_SHA"  # Global fallback (per-bundle resolved_ref preferred)
 
     @property
     def trenni_webhook_url(self) -> str:
