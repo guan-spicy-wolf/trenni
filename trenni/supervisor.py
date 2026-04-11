@@ -52,6 +52,7 @@ from .runtime_types import ContainerState, JobHandle
 from .scheduler import Scheduler
 from .spawn_handler import SpawnHandler
 from .state import SpawnDefaults, SpawnedJob, SupervisorState, TaskRecord
+from .workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,11 @@ class Supervisor:
         self._event_processing_lock = asyncio.Lock()
         self._launched_event_ids = self.state.launched_event_ids
         self._spawn_defaults_by_job = self.state.spawn_defaults_by_job
+        self._job_temp_dirs: dict[str, list[Path]] = {}  # ADR-0015: workspace cleanup
 
         self.scheduler = Scheduler(self.state, max_workers=config.max_workers, bundles=config.bundles)
         self.spawn_handler = SpawnHandler(self.state)
+        self.workspace_manager = WorkspaceManager(config)  # ADR-0015: clone bundle/target
 
         self._checkpoint_cycles = _DEFAULT_CHECKPOINT_CYCLES
         self._reap_timeout = self.runtime_defaults.cleanup_timeout_seconds
@@ -647,6 +650,11 @@ class Supervisor:
         if bundle:
             self.state.decrement_bundle_running(bundle)
         
+        # ADR-0015: Cleanup workspaces after job terminal
+        temp_dirs = self._job_temp_dirs.pop(job_id, [])
+        if temp_dirs:
+            self.workspace_manager.cleanup(temp_dirs)
+        
         _, cancelled = await self.scheduler.record_job_terminal(
             job_id=job_id,
             summary=summary,
@@ -1037,6 +1045,19 @@ class Supervisor:
         analyzer_version=None,  # ADR-0017: AnalyzerVersion
     ) -> None:
         """Launch a job in the isolation backend."""
+        
+        # ADR-0015: Prepare bundle and target workspaces
+        prepared = self.workspace_manager.prepare(
+            job_id=job_id,
+            bundle=bundle,
+            repo=repo,
+            init_branch=init_branch,
+            bundle_sha=evo_sha,  # Bundle SHA from trigger/spawn
+        )
+        
+        # Track temp dirs for cleanup
+        self._job_temp_dirs[job_id] = prepared.temp_dirs
+        
         spec = self.runtime_builder.build(
             job_id=job_id,
             task_id=task_id or job_id,
@@ -1052,6 +1073,8 @@ class Supervisor:
             job_context=job_context,
             input_artifacts=input_artifacts,  # ADR-0013
             analyzer_version=analyzer_version,  # ADR-0017
+            bundle_source=prepared.bundle_source,  # ADR-0015
+            target_source=prepared.target_source,  # ADR-0015
         )
 
         # Validate runtime environment before container creation

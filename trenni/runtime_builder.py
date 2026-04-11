@@ -69,6 +69,8 @@ class RuntimeSpecBuilder:
         job_context: JobContextConfig | None = None,
         input_artifacts: list[ArtifactBinding] | None = None,  # ADR-0013
         analyzer_version=None,  # ADR-0017: AnalyzerVersion
+        bundle_source=None,  # ADR-0015: BundleSource
+        target_source=None,  # ADR-0015: TargetSource
     ) -> JobRuntimeSpec:
         """Build JobRuntimeSpec from task semantics and role-derived defaults."""
         # Workspace: use defaults + repo/init_branch/input_artifacts from spawn
@@ -111,6 +113,8 @@ class RuntimeSpecBuilder:
                 ).model_dump(mode="json"),
                 "context": (job_context or JobContextConfig()).model_dump(mode="json", exclude_none=True),
                 "analyzer_version": analyzer_version.model_dump(mode="json") if analyzer_version else None,
+                "bundle_source": bundle_source.model_dump(mode="json") if bundle_source else None,
+                "target_source": target_source.model_dump(mode="json") if target_source else None,
             }
         )
 
@@ -169,12 +173,14 @@ class RuntimeSpecBuilder:
 
         # Determine volume mounts
         volume_mounts: list[tuple[str, str, bool]] = []
-
-        # Mount evo directory if evo_root is configured
-        # Use evo_root_host for the host path (required for volume mounts from within container)
-        # RW mount for implementer writes (serialized via bundle max_concurrent_jobs=1)
-        if self.config.evo_root and self.config.evo_root_host:
-            volume_mounts.append((self.config.evo_root_host, "/opt/yoitsu/palimpsest/evo", True))
+        
+        # ADR-0015: Mount bundle workspace (code loading, RO for palimpsest)
+        if bundle_source and bundle_source.workspace:
+            volume_mounts.append((bundle_source.workspace, "/opt/yoitsu/palimpsest/bundle", False))
+        
+        # ADR-0015: Mount target workspace (execution, RW for task)
+        if target_source and target_source.workspace:
+            volume_mounts.append((target_source.workspace, "/opt/yoitsu/palimpsest/target", True))
 
         # Factorio worker preparation syncs scripts into the live mod scripts directory.
         # When the path is passed only as an env var, writes would stay inside the job

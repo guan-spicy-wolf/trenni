@@ -5,6 +5,7 @@ import pytest
 from trenni.config import TrenniConfig, BundleConfig, BundleRuntimeConfig, BundleSchedulingConfig
 from trenni.runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
 from trenni.runtime_types import RuntimeDefaults
+from yoitsu_contracts.config import BundleSource, TargetSource
 
 
 def test_runtime_spec_builder_uses_bundle_config():
@@ -248,6 +249,20 @@ def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: py
     )
 
     builder = RuntimeSpecBuilder(config, defaults)
+    
+    # ADR-0015: Test with bundle_source and target_source
+    bundle_source = BundleSource(
+        name="factorio",
+        repo_uri="git+file:///home/holo/yoitsu/evo",
+        selector="main",
+        resolved_ref="",
+        workspace="/home/holo/yoitsu/evo/factorio",
+    )
+    target_source = TargetSource(
+        repo_uri="",
+        branch="main",
+        workspace="/home/holo/yoitsu/target",
+    )
 
     spec = builder.build(
         job_id="factorio-worker-1",
@@ -258,8 +273,14 @@ def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: py
         repo="",
         init_branch="main",
         evo_sha=None,
+        bundle_source=bundle_source,
+        target_source=target_source,
     )
 
-    assert ("/home/holo/yoitsu/evo", "/opt/yoitsu/palimpsest/evo", False) in spec.volume_mounts
+    # ADR-0015: Bundle workspace mounted RO
+    assert (bundle_source.workspace, "/opt/yoitsu/palimpsest/bundle", False) in spec.volume_mounts
+    # ADR-0015: Target workspace mounted RW
+    assert (target_source.workspace, "/opt/yoitsu/palimpsest/target", True) in spec.volume_mounts
+    # Factorio mod scripts dir still RW
     assert (mod_scripts_dir, mod_scripts_dir, True) in spec.volume_mounts
     assert spec.env["FACTORIO_MOD_SCRIPTS_DIR"] == mod_scripts_dir
