@@ -307,8 +307,13 @@ class Supervisor:
             else:
                 try:
                     await self._launch_from_spawned(job)
-                except Exception:
+                except Exception as exc:
                     logger.exception("Failed to launch queued job %s", job.job_id)
+                    await self._fail_job_before_launch(
+                        job_id=job.job_id,
+                        error=f"Runtime launch failed for job {job.job_id}: {exc}",
+                        code="runtime_launch_failed",
+                    )
                 continue
 
     async def _launch_from_spawned(self, job: SpawnedJob) -> None:

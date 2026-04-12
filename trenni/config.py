@@ -139,6 +139,7 @@ class TrenniConfig:
     pasloe_url: str = "http://localhost:8000"
     pasloe_api_key_env: str = "PASLOE_API_KEY"
     source_id: str = "trenni-supervisor"
+    workspace_root: str = "/tmp/yoitsu-workspaces"
     bundle_root: str = ""
     bundle_root_host: str = ""  # Host path for volume mounts (when running in container)
 

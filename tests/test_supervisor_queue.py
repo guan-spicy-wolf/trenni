@@ -3,6 +3,7 @@
 Per Bundle MVP: bundle and role are required fields in trigger events.
 """
 import asyncio
+import contextlib
 import re
 import time
 from datetime import datetime
@@ -842,6 +843,50 @@ async def test_launch_fails_job_when_bundle_workspace_prepare_fails():
     fail_data = next(data for type_, data in emitted if type_ == "supervisor.job.failed")
     assert fail_data["code"] == "bundle_workspace_prepare_failed"
     assert "factorio" in fail_data["error"]
+    assert any(type_ == "supervisor.task.failed" for type_, _ in emitted)
+
+
+@pytest.mark.asyncio
+async def test_drain_queue_fails_job_when_launch_raises():
+    sup = _make_supervisor()
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+        return None
+
+    sup.client.emit = fake_emit
+    sup.scheduler.evaluate_job = MagicMock(return_value=True)
+    sup.scheduler.has_bundle_capacity = MagicMock(return_value=True)
+    sup.scheduler.has_capacity = MagicMock(return_value=True)
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...", bundle="factorio")
+    job = SpawnedJob(
+        job_id="j1",
+        source_event_id="e1",
+        goal="test",
+        role="default",
+        repo="",
+        init_branch="main",
+        bundle_sha="sha1",
+        task_id="t1",
+        bundle="factorio",
+    )
+    sup.state.jobs_by_id["j1"] = job
+    sup._ready_queue.put_nowait(job)
+    sup._launch_from_spawned = AsyncMock(side_effect=RuntimeError("podman create failed"))
+
+    drain_task = asyncio.create_task(sup._drain_queue())
+    try:
+        await asyncio.sleep(0.05)
+    finally:
+        drain_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await drain_task
+
+    assert any(type_ == "supervisor.job.failed" for type_, _ in emitted)
+    fail_data = next(data for type_, data in emitted if type_ == "supervisor.job.failed")
+    assert fail_data["code"] == "runtime_launch_failed"
+    assert "podman create failed" in fail_data["error"]
     assert any(type_ == "supervisor.task.failed" for type_, _ in emitted)
 
 

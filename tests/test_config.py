@@ -230,9 +230,11 @@ bundles: {}
         config_yaml = tmp_path / "config.yaml"
         config_yaml.write_text("""
 pasloe_url: http://localhost:9000
+workspace_root: /var/tmp/yoitsu-workspaces
 """)
         config = TrenniConfig.from_yaml(config_yaml)
         assert config.bundles == {}
+        assert config.workspace_root == "/var/tmp/yoitsu-workspaces"
 
     def test_from_yaml_bundle_with_minimal_config(self, tmp_path):
         """TrenniConfig.from_yaml should handle bundle with minimal config."""

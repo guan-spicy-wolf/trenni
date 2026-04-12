@@ -7,10 +7,8 @@ Palimpsest receives workspace paths in JobConfig.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -43,7 +41,8 @@ class WorkspaceManager:
     
     def __init__(self, config: TrenniConfig) -> None:
         self.config = config
-        self._base_dir = Path(tempfile.gettempdir()) / "yoitsu-workspaces"
+        # Must be visible to both the Trenni container and the host Podman daemon.
+        self._base_dir = Path(config.workspace_root or "/tmp/yoitsu-workspaces")
         self._base_dir.mkdir(parents=True, exist_ok=True)
     
     def prepare(
