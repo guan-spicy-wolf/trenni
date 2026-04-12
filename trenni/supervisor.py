@@ -736,11 +736,13 @@ class Supervisor:
             await self._cleanup_handle(handle, failed=is_failure or is_cancelled)
 
         # ADR-0010 D5: Emit budget_variance observation for completed jobs
-        if not replay and not is_failure and not is_cancelled:
+        # Skip optimizer/implementer roles to prevent self-optimization loop
+        if not replay and not is_failure and not is_cancelled and job_record and job_record.role not in ("optimizer", "implementer"):
             await self._emit_budget_variance(job_id, event)
         
         # ADR-0017: Run observation analyzers after job terminal
-        if not replay:
+        # Skip optimizer/implementer roles to prevent cascade
+        if not replay and job_record and job_record.role not in ("optimizer", "implementer"):
             await self._run_observation_analyzers(job_id, event, job_record)
 
         # ADR-0010: Handle optimizer output - parse ReviewProposal and spawn optimization task
