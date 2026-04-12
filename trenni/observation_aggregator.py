@@ -104,18 +104,65 @@ async def aggregate_observations(
                 break
     
     # Compute window-wide counts (ALL events, NOT filtered by processed_ids)
-    counts: dict[str, int] = {}
+    # Per tool_repetition threshold semantics: count per tool_name, not per metric_type
+    # Each tool is tracked independently - threshold=5 means "5 jobs called this tool repeatedly"
+    counts: dict[str, int] = {}  # metric_type -> count (for non-tool metrics)
+    tool_counts: dict[str, dict[str, int]] = {}  # metric_type -> tool_name -> count
+    
     for evt in all_events:
         event_type = evt.get("type", "")
         if not event_type.startswith("observation."):
             continue
         metric = event_type.split(".", 1)[1] if "." in event_type else ""
-        counts[metric] = counts.get(metric, 0) + 1
+        
+        # For tool_repetition, count per tool_name
+        if metric == "tool_repetition":
+            tool_name = evt.get("data", {}).get("tool_name", "unknown")
+            if metric not in tool_counts:
+                tool_counts[metric] = {}
+            tool_counts[metric][tool_name] = tool_counts[metric].get(tool_name, 0) + 1
+        else:
+            # For other metrics, count per metric_type
+            counts[metric] = counts.get(metric, 0) + 1
     
-    # Build results with window-wide counts AND evidence payloads
-    # Per plan Task 1: extract latest 5 events per metric for optimizer spawn
+    # Build results - one per tool for tool_repetition, one per metric for others
     results = []
+    
+    # Handle tool_repetition: emit one result per tool
+    if "tool_repetition" in tool_counts:
+        threshold = thresholds.get("tool_repetition", float("inf"))
+        for tool_name, count in tool_counts["tool_repetition"].items():
+            # Extract evidence for this specific tool
+            tool_events = [
+                evt for evt in all_events
+                if evt.get("type", "") == "observation.tool_repetition"
+                and evt.get("data", {}).get("tool_name", "") == tool_name
+            ]
+            tool_events.sort(key=lambda e: e.get("ts", ""), reverse=True)
+            evidence = [
+                {
+                    "role": evt.get("data", {}).get("role", ""),
+                    "bundle": evt.get("data", {}).get("bundle", ""),
+                    "tool_name": evt.get("data", {}).get("tool_name", ""),
+                    "call_count": evt.get("data", {}).get("call_count", 0),
+                    "arg_pattern": evt.get("data", {}).get("arg_pattern", ""),
+                    "similarity": evt.get("data", {}).get("similarity", 0.0),
+                }
+                for evt in tool_events[:5]
+            ]
+            # metric_type includes tool_name for aggregation result
+            results.append(AggregationResult(
+                metric_type=f"tool_repetition:{tool_name}",  # Include tool_name for clarity
+                count=count,
+                threshold=threshold,
+                exceeded=(count >= threshold),
+                evidence=evidence,
+            ))
+    
+    # Handle other metrics (budget_variance, etc.)
     for metric, count in counts.items():
+        if metric == "tool_repetition":
+            continue  # Already handled above
         threshold = thresholds.get(metric, float("inf"))
         
         # Extract evidence events for this metric (latest 5)
@@ -123,35 +170,44 @@ async def aggregate_observations(
             evt for evt in all_events
             if evt.get("type", "").endswith(metric)
         ]
-        # Sort by timestamp (newest first), take latest 5
         metric_events.sort(key=lambda e: e.get("ts", ""), reverse=True)
         evidence = [
             {
                 "role": evt.get("data", {}).get("role", ""),
                 "bundle": evt.get("data", {}).get("bundle", ""),
-                "tool_name": evt.get("data", {}).get("tool_name", ""),
-                "call_count": evt.get("data", {}).get("call_count", 0),
-                "arg_pattern": evt.get("data", {}).get("arg_pattern", ""),
-                "similarity": evt.get("data", {}).get("similarity", 0.0),
             }
             for evt in metric_events[:5]
         ]
         
         results.append(AggregationResult(
             metric_type=metric,
-            count=count,  # Window-wide total (for threshold)
+            count=count,
             threshold=threshold,
             exceeded=(count >= threshold),
-            evidence=evidence,  # Latest 5 evidence payloads
+            evidence=evidence,
         ))
     
     # Compute per-metric new_ids (events NOT yet processed)
-    # Each metric gets its own batch for triggered_by/batch_members
+    # For tool_repetition, include tool_name in the key
     processed_set = processed_ids or set()
     metric_new_ids: dict[str, list[str]] = {}
-    for metric, ids in metric_event_ids.items():
-        unprocessed = [id for id in ids if id not in processed_set]
-        if unprocessed:
-            metric_new_ids[metric] = unprocessed
+    
+    for evt in all_events:
+        event_id = evt.get("id", "")
+        if not event_id or event_id in processed_set:
+            continue
+        event_type = evt.get("type", "")
+        if not event_type.startswith("observation."):
+            continue
+        metric = event_type.split(".", 1)[1] if "." in event_type else ""
+        
+        # For tool_repetition, use metric:tool_name as key
+        if metric == "tool_repetition":
+            tool_name = evt.get("data", {}).get("tool_name", "unknown")
+            key = f"tool_repetition:{tool_name}"
+        else:
+            key = metric
+        
+        metric_new_ids.setdefault(key, []).append(event_id)
     
     return results, metric_new_ids
