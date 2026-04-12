@@ -5,7 +5,7 @@ import os
 
 import yaml
 from yoitsu_contracts.artifact import ArtifactBinding
-from yoitsu_contracts.config import EventStoreConfig, JobConfig, JobContextConfig
+from yoitsu_contracts.config import EventStoreConfig, JobConfig, JobContextConfig, BundleSource, TargetSource
 from yoitsu_contracts.env import build_git_auth_env
 
 from .config import BundleRuntimeConfig, TrenniConfig, _UNSET
@@ -113,8 +113,20 @@ class RuntimeSpecBuilder:
                 ).model_dump(mode="json"),
                 "context": (job_context or JobContextConfig()).model_dump(mode="json", exclude_none=True),
                 "analyzer_version": analyzer_version.model_dump(mode="json") if analyzer_version else None,
-                "bundle_source": bundle_source.model_dump(mode="json") if bundle_source else None,
-                "target_source": target_source.model_dump(mode="json") if target_source else None,
+                # ADR-0015: Use container-internal paths for bundle/target
+                "bundle_source": BundleSource(
+                    name=bundle_source.name if bundle_source else bundle,
+                    repo_uri=bundle_source.repo_uri if bundle_source else "",
+                    selector=bundle_source.selector if bundle_source else "main",
+                    resolved_ref=bundle_source.resolved_ref if bundle_source else bundle_sha or "",
+                    workspace="/opt/yoitsu/palimpsest/bundle",  # Container-internal mount point
+                ).model_dump(mode="json") if bundle_source else None,
+                "target_source": TargetSource(
+                    repo_uri=target_source.repo_uri if target_source else "",
+                    selector=target_source.selector if target_source else "main",
+                    resolved_ref=target_source.resolved_ref if target_source else "",
+                    workspace="/opt/yoitsu/palimpsest/target",  # Container-internal mount point
+                ).model_dump(mode="json") if target_source else None,
             }
         )
 

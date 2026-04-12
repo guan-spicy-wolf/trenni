@@ -77,7 +77,7 @@ class BundleSourceConfig:
     Trenni resolves selector to a specific commit SHA at job dispatch time.
 
     Attributes:
-        url: Bundle repo URI (git+file://, git+ssh://, git+https://)
+        url: Bundle repo URI (git+file://, git+ssh://, git+https://, or direct git remote)
         selector: Branch or tag name to track (e.g., "evolve", "main", "v1.2.3")
     """
     url: str = ""

@@ -149,7 +149,7 @@ class WorkspaceManager:
                     capture_output=True,
                 )
             else:
-                # Assume it's a direct git URL
+                # Assume it's a direct git remote like https://github.com/org/repo.git.
                 subprocess.run(
                     ["git", "clone", "--depth", "1", "--branch", selector, url, str(ws_dir)],
                     check=True,

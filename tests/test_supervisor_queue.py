@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trenni.config import TrenniConfig
+from trenni.config import BundleConfig, TrenniConfig
 from trenni.pasloe_client import Event
 from trenni.runtime_types import ContainerState, JobHandle, JobRuntimeSpec
 from trenni.state import TaskRecord
@@ -24,6 +24,14 @@ def _evt(id_: str, type_: str, data: dict | None = None) -> Event:
 
 
 def _make_supervisor(**overrides) -> Supervisor:
+    overrides.setdefault(
+        "bundles",
+        {
+            "factorio": BundleConfig.from_dict(
+                {"source": {"url": "https://github.com/guan-spicy-wolf/factorio-bundle.git"}}
+            )
+        },
+    )
     return Supervisor(TrenniConfig(**overrides))
 
 
@@ -138,6 +146,58 @@ async def test_handle_trigger_missing_role_rejected():
     await sup._handle_trigger(event)
 
     assert sup._ready_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_trigger_unknown_bundle_fails_task():
+    sup = _make_supervisor()
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+
+    sup.client.emit = fake_emit
+    event = _evt(
+        "evt-unknown-bundle",
+        "trigger.external.received",
+        {"goal": "do X", "role": "default", "bundle": "missing"},
+    )
+
+    await sup._handle_trigger(event)
+
+    assert sup._ready_queue.qsize() == 0
+    assert len(sup.state.jobs_by_id) == 0
+    assert len(sup.state.tasks) == 1
+    assert [type_ for type_, _ in emitted] == [
+        "supervisor.task.created",
+        "supervisor.task.failed",
+    ]
+    assert emitted[-1][1]["reason"] == "Unknown bundle 'missing'"
+
+
+@pytest.mark.asyncio
+async def test_handle_trigger_bundle_without_source_fails_task():
+    sup = _make_supervisor(bundles={"factorio": BundleConfig()})
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+
+    sup.client.emit = fake_emit
+    event = _evt(
+        "evt-no-bundle-source",
+        "trigger.external.received",
+        {"goal": "do X", "role": "default", "bundle": "factorio"},
+    )
+
+    await sup._handle_trigger(event)
+
+    assert sup._ready_queue.qsize() == 0
+    assert [type_ for type_, _ in emitted] == [
+        "supervisor.task.created",
+        "supervisor.task.failed",
+    ]
+    assert emitted[-1][1]["reason"] == "Bundle 'factorio' has no configured source"
 
 
 @pytest.mark.asyncio
@@ -735,6 +795,57 @@ async def test_launch_propagates_ensure_ready_errors():
 
 
 @pytest.mark.asyncio
+async def test_launch_fails_job_when_bundle_workspace_prepare_fails():
+    sup = _make_supervisor()
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+        return None
+
+    sup.client.emit = fake_emit
+    sup.runtime_builder.build = MagicMock()
+    sup.backend.ensure_ready = AsyncMock()
+    sup.backend.prepare = AsyncMock()
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...", bundle="factorio")
+    sup.state.jobs_by_id["j1"] = SpawnedJob(
+        job_id="j1",
+        source_event_id="e1",
+        goal="test",
+        role="default",
+        repo="",
+        init_branch="main",
+        bundle_sha="sha1",
+        task_id="t1",
+        bundle="factorio",
+    )
+    sup.workspace_manager.prepare = MagicMock(
+        return_value=SimpleNamespace(bundle_source=None, target_source=None, temp_dirs=[])
+    )
+
+    await sup._launch(
+        "j1",
+        "test",
+        "default",
+        "",
+        "main",
+        "sha1",
+        source_event_id="e1",
+        task_id="t1",
+        bundle="factorio",
+    )
+
+    assert not sup.runtime_builder.build.called
+    assert not sup.backend.ensure_ready.await_count
+    assert not sup.backend.prepare.await_count
+    assert any(type_ == "supervisor.job.failed" for type_, _ in emitted)
+    fail_data = next(data for type_, data in emitted if type_ == "supervisor.job.failed")
+    assert fail_data["code"] == "bundle_workspace_prepare_failed"
+    assert "factorio" in fail_data["error"]
+    assert any(type_ == "supervisor.task.failed" for type_, _ in emitted)
+
+
+@pytest.mark.asyncio
 async def test_mark_exited_jobs():
     sup = _make_supervisor()
     handle = JobHandle("j1", "ctr-1", "yoitsu-job-j1")
@@ -751,6 +862,42 @@ async def test_mark_exited_jobs():
     first_ts = handle.exited_at
     await sup._mark_exited_jobs()
     assert handle.exited_at == first_ts
+
+
+@pytest.mark.asyncio
+async def test_mark_exited_jobs_fails_pre_start_container_exit():
+    sup = _make_supervisor()
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+        return "evt-runtime-failed"
+
+    sup.client.emit = fake_emit
+    sup.backend.logs = AsyncMock(return_value="container log line")
+    sup.backend.stop = AsyncMock()
+    sup.backend.remove = AsyncMock()
+    sup.state.tasks["t1"] = TaskRecord(task_id="t1", goal="...", bundle="factorio")
+    sup.state.jobs_by_id["j1"] = SpawnedJob(
+        job_id="j1", source_event_id="e1", goal="t", role="default",
+        repo="r", init_branch="b", bundle_sha="s", task_id="t1", bundle="factorio"
+    )
+    handle = JobHandle("j1", "ctr-1", "yoitsu-job-j1")
+    sup.jobs["j1"] = handle
+    sup.backend.inspect = AsyncMock(return_value=ContainerState(
+        exists=True, status="exited", running=False, exit_code=42,
+    ))
+
+    await sup._mark_exited_jobs()
+
+    assert "j1" not in sup.jobs
+    types = [event_type for event_type, _ in emitted]
+    assert "supervisor.job.failed" in types
+    assert "supervisor.task.failed" in types
+    fail_data = next(data for event_type, data in emitted if event_type == "supervisor.job.failed")
+    assert fail_data["code"] == "runtime_exit_before_start"
+    assert fail_data["exit_code"] == 42
+    assert "container log line" in fail_data["logs_tail"]
 
 
 @pytest.mark.asyncio
@@ -786,10 +933,10 @@ async def test_checkpoint_reaps_timed_out_containers():
 
     assert "j1" not in sup.jobs
     types = [e[0] for e in emitted]
-    assert "agent.job.failed" in types
+    assert "supervisor.job.failed" in types
     assert "supervisor.task.failed" in types
     assert "supervisor.checkpoint" in types
-    fail_data = next(d for t, d in emitted if t == "agent.job.failed")
+    fail_data = next(d for t, d in emitted if t == "supervisor.job.failed")
     assert fail_data["code"] == "runtime_lost"
     assert "container log line" in fail_data["logs_tail"]
     sup.backend.stop.assert_awaited_once()
@@ -914,9 +1061,16 @@ async def test_replay_skips_completed():
 
 
 @pytest.mark.asyncio
-async def test_replay_reenqueues_missing_container():
+async def test_replay_fails_missing_launched_container():
     sup = _make_supervisor()
     sup._inspect_replay_state = AsyncMock(return_value=ContainerState(exists=False))
+    emitted = []
+
+    async def fake_emit(type_, data, **kwargs):
+        emitted.append((type_, data))
+        return "evt-replay-runtime-failed"
+
+    sup.client.emit = fake_emit
 
     async def fake_fetch_all(type_, source=None):
         if type_ == "supervisor.job.enqueued":
@@ -951,7 +1105,9 @@ async def test_replay_reenqueues_missing_container():
     sup._fetch_all = fake_fetch_all
 
     await sup._replay_unfinished_tasks()
-    assert sup._ready_queue.qsize() == 1
+    assert sup._ready_queue.qsize() == 0
+    assert "job-A" in sup._failed_jobs
+    assert any(type_ == "supervisor.job.failed" for type_, _ in emitted)
 
 
 @pytest.mark.asyncio

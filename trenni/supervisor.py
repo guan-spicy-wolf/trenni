@@ -22,12 +22,12 @@ from yoitsu_contracts.events import (
     EvalSpec,
     JobCancelledData,
     JobCompletedData,
-    JobFailedData,
     SemanticVerdict,
     SpawnRequestData,
     StructuralVerdict,
     SupervisorCheckpointData,
     SupervisorJobEnqueuedData,
+    SupervisorJobFailedData,
     SupervisorJobLaunchedData,
     TaskCancelledData,
     TaskCompletedData,
@@ -90,6 +90,7 @@ class Supervisor:
         self._processing_event_ids: set[str] = set()
         self._event_processing_lock = asyncio.Lock()
         self._launched_event_ids = self.state.launched_event_ids
+        self._started_job_ids: set[str] = set()
         self._spawn_defaults_by_job = self.state.spawn_defaults_by_job
         self._job_temp_dirs: dict[str, list[Path]] = {}  # ADR-0015: workspace cleanup
 
@@ -361,7 +362,7 @@ class Supervisor:
                         await self._handle_spawn(event, replay=replay)
                     case "supervisor.job.enqueued":
                         await self._handle_job_enqueued(event, replay=replay)
-                    case "agent.job.completed" | "agent.job.failed" | "agent.job.cancelled":
+                    case "agent.job.completed" | "agent.job.failed" | "agent.job.cancelled" | "supervisor.job.failed":
                         await self._handle_job_done(event, replay=replay)
                     case "agent.job.started":
                         await self._handle_job_started(event, replay=replay)
@@ -459,13 +460,30 @@ class Supervisor:
         root_job_id = f"{task_id}-root"
         bundle = str(data.bundle or "").strip()
         role = str(data.role or "").strip()
-        
-        # Validate required fields per Bundle MVP
+
         if not bundle:
-            logger.error(f"Trigger {event.id} missing bundle field")
+            await self._reject_task_submission(
+                task_id=task_id,
+                bundle="",
+                goal=data.goal,
+                source_trigger_id=event.id,
+                reason="Trigger missing bundle field",
+                role=role,
+                budget=data.budget,
+                replay=replay,
+            )
             return
         if not role:
-            logger.error(f"Trigger {event.id} missing role field")
+            await self._reject_task_submission(
+                task_id=task_id,
+                bundle=bundle,
+                goal=data.goal,
+                source_trigger_id=event.id,
+                reason="Trigger missing role field",
+                role="",
+                budget=data.budget,
+                replay=replay,
+            )
             return
 
         self.scheduler.record_task_submission(
@@ -516,14 +534,14 @@ class Supervisor:
             input_artifacts=list(data.input_artifacts),  # ADR-0013
             analyzer_version=self._analyzer_version,  # ADR-0017
         )
-        budget_error = self._validate_spawned_job_budget(root_job)
-        if budget_error:
+        validation_error = self._validate_spawned_job(root_job)
+        if validation_error:
             if not replay:
                 await self._emit_task_terminal(
                     task_id=task_id,
                     state="failed",
                     result=TaskResult(),
-                    reason=budget_error,
+                    reason=validation_error,
                 )
             return
 
@@ -531,6 +549,52 @@ class Supervisor:
         if cancelled and not replay:
             await self._emit_cancellations(cancelled, reason="Initial condition is impossible")
         self._launched_event_ids.add(event.id)
+
+    async def _reject_task_submission(
+        self,
+        *,
+        task_id: str,
+        bundle: str,
+        goal: str,
+        source_trigger_id: str,
+        reason: str,
+        role: str,
+        budget: float,
+        replay: bool,
+    ) -> None:
+        self.scheduler.record_task_submission(
+            task_id=task_id,
+            goal=goal,
+            source_event_id=source_trigger_id,
+            spec={"bundle": bundle, "budget": budget, "role": role},
+        )
+        task = self.state.tasks.get(task_id)
+        if task is not None:
+            task.bundle = bundle
+
+        if replay:
+            return
+
+        await self.client.emit(
+            "supervisor.task.created",
+            TaskCreatedData(
+                task_id=task_id,
+                bundle=bundle,
+                goal=goal,
+                source_trigger_id=source_trigger_id,
+            ).model_dump(mode="json"),
+            idempotency_key=self._event_idempotency_key(
+                source_event_id=source_trigger_id,
+                event_type="supervisor.task.created",
+                entity_id=task_id,
+            ),
+        )
+        await self._emit_task_terminal(
+            task_id=task_id,
+            state="failed",
+            result=TaskResult(),
+            reason=reason,
+        )
 
     async def _handle_spawn(self, event: Event, *, replay: bool = False) -> None:
         payload = SpawnRequestData.model_validate(event.data)
@@ -562,14 +626,14 @@ class Supervisor:
 
         cancelled: list[SpawnedJob] = []
         for job in plan.jobs:
-            budget_error = self._validate_spawned_job_budget(job)
-            if budget_error:
+            validation_error = self._validate_spawned_job(job)
+            if validation_error:
                 if not replay:
                     await self._emit_task_terminal(
                         task_id=job.task_id or job.job_id,
                         state="failed",
                         result=TaskResult(),
-                        reason=budget_error,
+                        reason=validation_error,
                     )
                 continue
             cancelled.extend(await self._enqueue(job, replay=replay))
@@ -626,7 +690,7 @@ class Supervisor:
         if not job_id:
             return
 
-        is_failure = event.type == "agent.job.failed"
+        is_failure = event.type in {"agent.job.failed", "supervisor.job.failed"}
         is_cancelled = event.type == "agent.job.cancelled"
         summary = (
             event.data.get("summary")
@@ -640,6 +704,7 @@ class Supervisor:
         completion_code = str(event.data.get("code") or "")
         if completion_code:
             self._job_completion_codes[job_id] = completion_code
+        self._started_job_ids.discard(job_id)
 
         handle = self.jobs.pop(job_id, None)
         job_record = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None))
@@ -955,8 +1020,150 @@ class Supervisor:
         if jobs_to_cancel:
             await self._emit_cancellations(jobs_to_cancel, reason=reason)
 
+    async def _fail_job_before_launch(
+        self,
+        *,
+        job_id: str,
+        error: str,
+        code: str,
+    ) -> None:
+        self.jobs.pop(job_id, None)
+        self._started_job_ids.discard(job_id)
+
+        job_record = self.state.jobs_by_id.get(job_id, SpawnedJob("", "", "", "", "", "", None))
+        task_id = job_record.task_id or job_id
+
+        temp_dirs = self._job_temp_dirs.pop(job_id, [])
+        if temp_dirs:
+            self.workspace_manager.cleanup(temp_dirs)
+
+        self._job_completion_codes[job_id] = code
+        await self.scheduler.record_job_terminal(
+            job_id=job_id,
+            summary=error,
+            failed=True,
+        )
+
+        payload = SupervisorJobFailedData(
+            job_id=job_id,
+            task_id=task_id,
+            error=error,
+            code=code,
+        ).model_dump(mode="json", exclude_none=True)
+        emitted_id = await self.client.emit(
+            "supervisor.job.failed",
+            payload,
+            idempotency_key=self._event_idempotency_key(
+                source_event_id=job_record.source_event_id or job_id,
+                event_type="supervisor.job.failed",
+                entity_id=job_id,
+            ),
+        )
+        if emitted_id:
+            self._processed_event_ids.add(emitted_id)
+
+        await self._evaluate_task_termination(
+            job_id=job_id,
+            task_id=task_id,
+            event=SimpleNamespace(
+                id=emitted_id or "",
+                source_id=self.config.source_id,
+                type="supervisor.job.failed",
+                data=payload,
+            ),
+        )
+
+    async def _close_runtime_failed_job(
+        self,
+        handle: JobHandle,
+        *,
+        error: str,
+        code: str,
+        logs_tail: str = "",
+        cleanup_handle: bool = True,
+    ) -> None:
+        self.jobs.pop(handle.job_id, None)
+        self._started_job_ids.discard(handle.job_id)
+
+        job_record = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None))
+        task_id = job_record.task_id or handle.job_id
+        bundle = job_record.bundle
+
+        if bundle:
+            self.state.decrement_bundle_running(bundle)
+
+        temp_dirs = self._job_temp_dirs.pop(handle.job_id, [])
+        if temp_dirs:
+            self.workspace_manager.cleanup(temp_dirs)
+
+        self._job_completion_codes[handle.job_id] = code
+        await self.scheduler.record_job_terminal(
+            job_id=handle.job_id,
+            summary=error,
+            failed=True,
+        )
+
+        payload = SupervisorJobFailedData(
+            job_id=handle.job_id,
+            task_id=task_id,
+            error=error,
+            code=code,
+            container_id=handle.container_id,
+            container_name=handle.container_name,
+            exit_code=handle.exit_code,
+            logs_tail=logs_tail[-4000:],
+        ).model_dump(mode="json", exclude_none=True)
+        emitted_id = await self.client.emit(
+            "supervisor.job.failed",
+            payload,
+            idempotency_key=self._event_idempotency_key(
+                source_event_id=job_record.source_event_id or handle.job_id,
+                event_type="supervisor.job.failed",
+                entity_id=handle.job_id,
+            ),
+        )
+        if emitted_id:
+            self._processed_event_ids.add(emitted_id)
+
+        if cleanup_handle:
+            await self._cleanup_handle(handle, failed=True)
+
+        await self._evaluate_task_termination(
+            job_id=handle.job_id,
+            task_id=task_id,
+            event=SimpleNamespace(
+                id=emitted_id or "",
+                source_id=self.config.source_id,
+                type="supervisor.job.failed",
+                data=payload,
+            ),
+        )
+
     async def _mark_exited_jobs(self) -> None:
+        previous_exit_times = {
+            job_id: handle.exited_at
+            for job_id, handle in self.jobs.items()
+        }
         await mark_exited_jobs(self.jobs, self.backend)
+        for job_id, handle in list(self.jobs.items()):
+            if handle.exited_at is None:
+                continue
+            if previous_exit_times.get(job_id) is not None:
+                continue
+            if job_id in self._started_job_ids:
+                continue
+            if job_id not in self.state.jobs_by_id:
+                continue
+            try:
+                logs = await self.backend.logs(handle)
+            except Exception:
+                logs = ""
+            await self._close_runtime_failed_job(
+                handle,
+                error=f"Container exited before agent.job.started (exit_code={handle.exit_code})",
+                code="runtime_exit_before_start",
+                logs_tail=logs,
+            )
 
     async def _checkpoint(self) -> None:
         reaped = await reap_timed_out_jobs(
@@ -966,31 +1173,12 @@ class Supervisor:
         )
 
         for handle, logs in reaped:
-            self.jobs.pop(handle.job_id, None)
-            job_record = self.state.jobs_by_id.get(handle.job_id, SpawnedJob("", "", "", "", "", "", None))
-            task_id = job_record.task_id if handle.job_id in self.state.jobs_by_id else handle.job_id
-            bundle = job_record.bundle
-            
-            # ADR-0011 D5: Track running jobs per bundle for launch conditions
-            if bundle:
-                self.state.decrement_bundle_running(bundle)
-            
-            await self.scheduler.record_job_terminal(
-                job_id=handle.job_id,
-                summary=f"Container exited without terminal event (exit_code={handle.exit_code})",
-                failed=True,
+            await self._close_runtime_failed_job(
+                handle,
+                error=f"Container exited without emitting terminal event (exit_code={handle.exit_code})",
+                code="runtime_lost",
+                logs_tail=logs,
             )
-            event_data = {
-                "job_id": handle.job_id,
-                "task_id": task_id,
-                "error": f"Container exited without emitting terminal event (exit_code={handle.exit_code})",
-                "code": "runtime_lost",
-                "logs_tail": logs[-4000:],
-            }
-            event = SimpleNamespace(id="", source_id="", type="agent.job.failed", data=event_data)
-            await self.client.emit("agent.job.failed", event_data)
-            await self._cleanup_handle(handle, failed=True)
-            await self._evaluate_task_termination(job_id=handle.job_id, task_id=task_id, event=event)
 
         snapshot = SupervisorCheckpointData.model_validate(self.state.snapshot())
         await self.client.emit("supervisor.checkpoint", snapshot.model_dump(mode="json"))
@@ -1017,6 +1205,7 @@ class Supervisor:
         job_id = event.data.get("job_id", "")
         if not job_id:
             return
+        self._started_job_ids.add(job_id)
         job = self.state.jobs_by_id.get(job_id)
         if job is None:
             return
@@ -1057,6 +1246,22 @@ class Supervisor:
         
         # Track temp dirs for cleanup
         self._job_temp_dirs[job_id] = prepared.temp_dirs
+
+        if bundle and not prepared.bundle_source:
+            await self._fail_job_before_launch(
+                job_id=job_id,
+                error=f"Bundle workspace preparation failed for bundle {bundle!r}",
+                code="bundle_workspace_prepare_failed",
+            )
+            return
+
+        if repo and not prepared.target_source:
+            await self._fail_job_before_launch(
+                job_id=job_id,
+                error=f"Target workspace preparation failed for repo {repo!r}",
+                code="target_workspace_prepare_failed",
+            )
+            return
         
         spec = self.runtime_builder.build(
             job_id=job_id,
@@ -1252,6 +1457,16 @@ class Supervisor:
     def _validate_spawned_job_budget(self, job: SpawnedJob) -> str | None:
         """Validate job budget. Per Bundle MVP, always returns None (no role metadata validation)."""
         return None
+
+    def _validate_spawned_job(self, job: SpawnedJob) -> str | None:
+        if not job.bundle:
+            return "Job missing bundle field"
+        bundle_config = self.config.bundles.get(job.bundle)
+        if bundle_config is None:
+            return f"Unknown bundle {job.bundle!r}"
+        if not bundle_config.source.url:
+            return f"Bundle {job.bundle!r} has no configured source"
+        return self._validate_spawned_job_budget(job)
 
     def _register_replayed_launch(self, event: Event) -> None:
         """Register a job from a replayed supervisor.job.launched event.

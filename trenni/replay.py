@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 
 from yoitsu_contracts.events import EvalSpec, TaskResult
 
@@ -22,6 +21,7 @@ async def rebuild_state(supervisor) -> None:
     fetch_plan = [
         ("supervisor.job.enqueued", supervisor.config.source_id),
         ("supervisor.job.launched", supervisor.config.source_id),
+        ("supervisor.job.failed", supervisor.config.source_id),
         ("agent.job.started", None),
         ("agent.job.completed", None),
         ("agent.job.failed", None),
@@ -52,7 +52,7 @@ async def rebuild_state(supervisor) -> None:
             launched_by_job[event.data.get("job_id", "")] = event
         elif event.type == "agent.job.started" and event.data.get("job_id"):
             started_job_ids.add(event.data["job_id"])
-        elif event.type in {"agent.job.completed", "agent.job.failed", "agent.job.cancelled"} and event.data.get("job_id"):
+        elif event.type in {"agent.job.completed", "agent.job.failed", "agent.job.cancelled", "supervisor.job.failed"} and event.data.get("job_id"):
             finished_job_ids.add(event.data["job_id"])
         elif event.type == "supervisor.task.created":
             task_id = event.data.get("task_id", "")
@@ -118,30 +118,15 @@ async def rebuild_state(supervisor) -> None:
         if job is None:
             continue
 
-        if job_id in started_job_ids:
-            event_data = {
-                "job_id": job_id,
-                "task_id": job.task_id,
-                "error": "Container disappeared before a terminal event was emitted",
-                "code": "runtime_lost",
-            }
-            await supervisor.client.emit("agent.job.failed", event_data)
-            await supervisor.scheduler.record_job_terminal(
-                job_id=job_id,
-                summary="Container disappeared before a terminal event was emitted",
-                failed=True,
-            )
-            from types import SimpleNamespace
-            await supervisor._evaluate_task_termination(
-                job_id=job_id,
-                task_id=job.task_id,
-                event=SimpleNamespace(id="", source_id="", type="agent.job.failed", data=event_data),
-            )
-            continue
-
-        cancelled = await supervisor.scheduler.enqueue(job)
-        if cancelled:
-            logger.info("Replay cancelled %s because its condition is already impossible", job_id)
+        error = "Container disappeared before a terminal event was emitted"
+        if job_id not in started_job_ids:
+            error = "Container disappeared before agent.job.started"
+        await supervisor._close_runtime_failed_job(
+            handle,
+            error=error,
+            code="runtime_lost",
+            cleanup_handle=False,
+        )
 
     # Rebuild bundle running counts from running jobs (Issue 5 fix)
     supervisor.state.replay_bundle_counts(running_jobs_with_bundles)

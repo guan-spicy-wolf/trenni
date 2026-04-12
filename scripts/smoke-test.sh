@@ -287,7 +287,7 @@ child_terminal = ''
 for e in events:
     t = e['type']
     d = e.get('data', {})
-    if t in ('agent.job.completed', 'agent.job.failed') and d.get('job_id') == planner_job_id:
+    if t in ('agent.job.completed', 'agent.job.failed', 'supervisor.job.failed') and d.get('job_id') == planner_job_id:
         planner_done = 1
     if t == 'supervisor.task.evaluating':
         evaluating = 1
@@ -333,7 +333,7 @@ for e in events:
     extra = ''
     if typ == 'supervisor.job.launched':
         extra = f' role={d.get(\"role\",\"?\")} task={task}'
-    elif typ in ('agent.job.completed', 'agent.job.failed', 'agent.job.started'):
+    elif typ in ('agent.job.completed', 'agent.job.failed', 'agent.job.started', 'supervisor.job.failed'):
         extra = f' {d.get(\"summary\",\"\")[:60]}'
     elif typ == 'agent.job.spawn_request':
         n = len(d.get('tasks', []))
