@@ -57,27 +57,30 @@ class ToolRepetitionAnalyzer:
             List of tool repetition observations
         """
         # Find job.completed event with tool_call_history
+        # PasloeEvent is a dataclass with .type and .data attributes
         completed_event = None
         for evt in job_events:
-            if evt.get("type") == "agent.job.completed":
+            # Handle both dict (replay) and PasloeEvent dataclass (realtime)
+            evt_type = evt.type if hasattr(evt, 'type') else evt.get('type', '')
+            if evt_type == "agent.job.completed":
                 completed_event = evt
                 break
         
         if not completed_event:
             return []
         
-        tool_call_history = completed_event.get("data", {}).get("tool_call_history", [])
+        # Handle both dict and PasloeEvent dataclass
+        if hasattr(completed_event, 'data'):
+            tool_call_history = completed_event.data.get('tool_call_history', [])
+        else:
+            tool_call_history = completed_event.get('data', {}).get('tool_call_history', [])
         if not tool_call_history:
             return []
         
         # Detect repetition patterns
-        from palimpsest.runtime.tool_pattern import detect_repetition
-        
-        # Import here to avoid circular dependency at module load
-        # detect_repetition is from palimpsest, but this module is in trenni
-        # In production, this would be bundle-provided analyzer
-        
+        # Import is inside try block because palimpsest is not available in trenni container
         try:
+            from palimpsest.runtime.tool_pattern import detect_repetition
             repetitions = detect_repetition(tool_call_history)
         except Exception:
             # If detect_repetition not available, use simple detection
