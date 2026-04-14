@@ -5,6 +5,7 @@ Per Bundle MVP: bundle and role are required fields in trigger events.
 import asyncio
 import contextlib
 import re
+import textwrap
 import time
 from datetime import datetime
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trenni.config import BundleConfig, TrenniConfig
+from trenni.bundle_repository import BundleRepositoryManager
 from trenni.pasloe_client import Event
 from trenni.runtime_types import ContainerState, JobHandle, JobRuntimeSpec
 from trenni.state import TaskRecord
@@ -35,7 +37,10 @@ def _make_supervisor(**overrides) -> Supervisor:
             )
         },
     )
-    return Supervisor(TrenniConfig(**overrides))
+    sup = Supervisor(TrenniConfig(**overrides))
+    # ADR-0021: Set control_plane_shas for bundle bootstrap check
+    sup.state.control_plane_shas["factorio"] = "abc123"
+    return sup
 
 
 def test_spawned_job_defaults():
@@ -175,6 +180,47 @@ async def test_handle_trigger_missing_role_uses_default_role():
     assert sup._ready_queue.qsize() == 1
     job = sup._ready_queue.get_nowait()
     assert job.role == "planner"
+
+
+@pytest.mark.asyncio
+async def test_get_role_metadata_fetches_master_and_reads_bundle_root_roles(tmp_path):
+    with patch.object(BundleRepositoryManager, "BUNDLES_DIR", tmp_path / "bundles"):
+        sup = _make_supervisor()
+    sup.state.control_plane_shas["factorio"] = "abc123"
+
+    roles_dir = tmp_path / "roles"
+    roles_dir.mkdir(parents=True)
+    (roles_dir / "worker.py").write_text(
+        textwrap.dedent(
+            """\
+            from palimpsest.runtime.roles import JobSpec, context_spec, role
+
+            @role(
+                name="worker",
+                description="Worker role",
+                needs=["factorio_mount", "factorio_runtime"],
+            )
+            def worker(**params) -> JobSpec:
+                return JobSpec(
+                    context_fn=context_spec(system="prompts/worker.md", sections=[]),
+                    tools=[],
+                )
+            """
+        )
+    )
+
+    sup.bundle_repo_manager.ensure_bare_clone = MagicMock()
+    sup.bundle_repo_manager.fetch = MagicMock(return_value="abc123")
+    sup.bundle_repo_manager.create_worktree = MagicMock(return_value=tmp_path)
+    sup.bundle_repo_manager.remove_worktree = MagicMock()
+
+    meta = await sup._get_role_metadata("factorio", "worker")
+
+    assert meta is not None
+    assert meta.name == "worker"
+    assert meta.needs == ["factorio_mount", "factorio_runtime"]
+    sup.bundle_repo_manager.fetch.assert_called_once_with("factorio", "master")
+    sup.bundle_repo_manager.remove_worktree.assert_called_once_with(tmp_path)
 
 
 @pytest.mark.asyncio

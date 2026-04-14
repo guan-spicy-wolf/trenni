@@ -33,6 +33,9 @@ async def rebuild_state(supervisor) -> None:
         ("supervisor.task.partial", None),
         ("supervisor.task.cancelled", None),
         ("supervisor.task.eval_failed", None),
+        # ADR-0021: Control-plane bundle trust boundary
+        ("bundle.control_plane.switched", None),  # state-mutating, may come from operator
+        ("control_plane.launch_applied", None),  # audit-only
     ]
 
     all_events = []

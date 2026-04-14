@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import asyncio.subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -191,6 +192,32 @@ class TaskRecord:
     result: TaskResult | None = None
     job_order: list[str] = field(default_factory=list)
 
+
+@dataclass
+class ControlPlaneFinalizeState:
+    """State for control-plane finalize execution.
+
+    Per ADR-0021: persists between job launch and job completion.
+    The subprocess handle is kept alive until finalize completes.
+
+    Restart policy: if Trenni restarts mid-job, subprocess_handle is lost.
+    Policy is to emit control_plane.finalize_skipped and proceed with
+    normal job finalization (ADR-0020 reconciliation absorbs this gap).
+
+    Attributes:
+        bundle: Bundle name
+        master_sha: SHA of master ref used for control-plane subprocess
+        master_worktree: Path to the worktree (for cleanup)
+        capabilities: List of control-plane capability names (in execution order)
+        subprocess_handle: The running subprocess (may be None after restart)
+    """
+    bundle: str
+    master_sha: str
+    master_worktree: str
+    capabilities: list[str] = field(default_factory=list)
+    subprocess_handle: asyncio.subprocess.Process | None = None
+
+
 @dataclass
 class SupervisorState:
     event_cursor: str | None = None
@@ -209,6 +236,9 @@ class SupervisorState:
     launched_event_ids: set[str] = field(default_factory=set)
     spawn_defaults_by_job: dict[str, SpawnDefaults] = field(default_factory=dict)
     running_jobs_by_bundle: dict[str, int] = field(default_factory=dict)
+    # ADR-0021: Control-plane trust boundary state
+    control_plane_shas: dict[str, str] = field(default_factory=dict)  # bundle → switched_sha
+    control_plane_finalize_state: dict[str, ControlPlaneFinalizeState] = field(default_factory=dict)  # job_id → state
 
     def increment_bundle_running(self, bundle: str) -> None:
         """Increment running job count for a bundle."""

@@ -71,6 +71,8 @@ class RuntimeSpecBuilder:
         analyzer_version=None,  # ADR-0017: AnalyzerVersion
         bundle_source=None,  # ADR-0015: BundleSource
         target_source=None,  # ADR-0015: TargetSource
+        extra_volume_mounts: list[tuple[str, str, bool]] | None = None,  # ADR-0021: Control-plane mounts
+        extra_env: dict[str, str] | None = None,  # ADR-0021: Control-plane env
     ) -> JobRuntimeSpec:
         """Build JobRuntimeSpec from task semantics and role-derived defaults."""
         # Workspace: use defaults + repo/init_branch/input_artifacts from spawn
@@ -185,22 +187,22 @@ class RuntimeSpecBuilder:
 
         # Determine volume mounts
         volume_mounts: list[tuple[str, str, bool]] = []
-        
+
         # ADR-0015: Mount bundle workspace (code loading, RO for palimpsest)
         if bundle_source and bundle_source.workspace:
             volume_mounts.append((bundle_source.workspace, "/opt/yoitsu/palimpsest/bundle", False))
-        
+
         # ADR-0015: Mount target workspace (execution, RW for task)
         if target_source and target_source.workspace:
             volume_mounts.append((target_source.workspace, "/opt/yoitsu/palimpsest/target", True))
 
-        # Factorio worker preparation syncs scripts into the live mod scripts directory.
-        # When the path is passed only as an env var, writes would stay inside the job
-        # container's private filesystem. Bind-mount the host path read-write so syncs
-        # actually update the live Factorio mod scripts directory.
-        mod_scripts_dir = env.get("FACTORIO_MOD_SCRIPTS_DIR", "")
-        if mod_scripts_dir:
-            volume_mounts.append((mod_scripts_dir, mod_scripts_dir, True))
+        # ADR-0021: Extra mounts from control-plane capability (e.g., factorio_mount)
+        if extra_volume_mounts:
+            volume_mounts.extend(extra_volume_mounts)
+
+        # ADR-0021: Extra env from control-plane capability
+        if extra_env:
+            env.update(extra_env)
 
         return JobRuntimeSpec(
             job_id=job_id,

@@ -40,7 +40,12 @@ from yoitsu_contracts.events import (
     TaskTraceEntry,
     TriggerData,
 )
-from yoitsu_contracts.role_metadata import RoleMetadataReader
+# ADR-0021: Control-plane bundle trust boundary events
+from yoitsu_contracts.events import (
+    BundleControlPlaneSwitched,
+    ControlPlaneLaunchApplied,
+)
+from yoitsu_contracts.role_metadata import RoleMetadata, RoleMetadataReader
 
 from .checkpoint import mark_exited_jobs, reap_timed_out_jobs
 from .config import TrenniConfig
@@ -48,6 +53,10 @@ from .pasloe_client import Event, PasloeClient
 from .podman_backend import PodmanBackend
 from .replay import rebuild_state
 from .runtime_builder import RuntimeSpecBuilder, build_runtime_defaults
+# ADR-0021: Control-plane capability execution
+from .bundle_repository import BundleRepositoryManager
+from .control_plane_executor import ControlPlaneExecutor, ControlPlaneTimeout, ControlPlaneFrameError, SharedDeadline
+from .state import ControlPlaneFinalizeState
 from .runtime_types import ContainerState, JobHandle
 from .scheduler import Scheduler
 from .spawn_handler import SpawnHandler
@@ -97,6 +106,9 @@ class Supervisor:
         self.scheduler = Scheduler(self.state, max_workers=config.max_workers, bundles=config.bundles)
         self.spawn_handler = SpawnHandler(self.state)
         self.workspace_manager = WorkspaceManager(config)  # ADR-0015: clone bundle/target
+        # ADR-0021: Control-plane capability execution
+        self.bundle_repo_manager = BundleRepositoryManager()
+        self.control_plane_executor = ControlPlaneExecutor()
 
         self._checkpoint_cycles = _DEFAULT_CHECKPOINT_CYCLES
         self._reap_timeout = self.runtime_defaults.cleanup_timeout_seconds
@@ -375,6 +387,11 @@ class Supervisor:
                         self._register_replayed_launch(event)
                     case "supervisor.task.created" | "supervisor.task.evaluating" | "supervisor.task.completed" | "supervisor.task.failed" | "supervisor.task.partial" | "supervisor.task.cancelled" | "supervisor.task.eval_failed":
                         pass  # State rebuilt naturally via replay if needed, but handled directly in Trigger/Done for realtime
+                    # ADR-0021: Control-plane bundle trust boundary
+                    case "bundle.control_plane.switched":
+                        await self._handle_bundle_control_plane_switched(event, replay=replay)
+                    case "control_plane.launch_applied":
+                        pass  # Audit-only; finalize state tracked via SupervisorState.control_plane_finalize_state
         except Exception:
             if event.id:
                 async with self._event_processing_lock:
@@ -388,6 +405,151 @@ class Supervisor:
             if realtime:
                 self._advance_cursor_from_event(event)
                 self._reset_webhook_poll_deadline()
+
+    async def _handle_bundle_control_plane_switched(
+        self, event: Event, *, replay: bool = False
+    ) -> None:
+        """Handle BundleControlPlaneSwitched event.
+
+        Per ADR-0021: this is a state-mutating event. Updates
+        SupervisorState.control_plane_shas[bundle] = sha.
+
+        Jobs will use the new sha for control-plane capability
+        execution starting from the next launch.
+        """
+        try:
+            data = BundleControlPlaneSwitched.model_validate(event.data)
+            self.state.control_plane_shas[data.bundle] = data.sha
+            logger.info(
+                f"Control-plane switched for {data.bundle} to {data.sha} "
+                f"by {data.switched_by}: {data.reason}"
+            )
+        except Exception as e:
+            logger.warning(f"Invalid BundleControlPlaneSwitched event {event.id}: {e}")
+
+    async def _get_role_metadata(
+        self,
+        bundle: str,
+        role: str,
+    ) -> RoleMetadata | None:
+        """Get role metadata from bundle.
+
+        Args:
+            bundle: Bundle name
+            role: Role name
+
+        Returns:
+            RoleMetadata if found, None otherwise
+        """
+        bundle_config = self.config.bundles.get(bundle)
+        if not bundle_config or not bundle_config.source.url:
+            return None
+
+        # Get switched SHA for this bundle
+        switched_sha = self.state.control_plane_shas.get(bundle)
+        if not switched_sha:
+            return None
+
+        # Create worktree at master@switched_sha to read role metadata
+        wt = None
+        try:
+            self.bundle_repo_manager.ensure_bare_clone(bundle, bundle_config.source.url)
+            self.bundle_repo_manager.fetch(bundle, bundle_config.source.master_selector)
+            wt = self.bundle_repo_manager.create_worktree(
+                bundle, switched_sha, writable=False, prefix="meta-check"
+            )
+
+            # RoleMetadataReader supports bundle-root roles/ directly.
+            reader = RoleMetadataReader(wt, bundle)
+            return reader.get_definition(role)
+        except Exception as e:
+            logger.warning(f"Failed to get role metadata for {bundle}:{role}: {e}")
+            return None
+        finally:
+            if wt:
+                self.bundle_repo_manager.remove_worktree(wt)
+
+    async def _capability_is_control_plane(
+        self,
+        bundle: str,
+        cap_name: str,
+        master_sha: str,
+    ) -> bool:
+        """Check if a capability has surface="control_plane".
+
+        Args:
+            bundle: Bundle name
+            cap_name: Capability name
+            master_sha: SHA to check (master@switched_sha)
+
+        Returns:
+            True if capability surface is control_plane
+        """
+        bundle_config = self.config.bundles.get(bundle)
+        if not bundle_config or not bundle_config.source.url:
+            return False
+
+        wt = None
+        try:
+            # Ensure bare clone exists and has the SHA
+            self.bundle_repo_manager.ensure_bare_clone(bundle, bundle_config.source.url)
+            # Fetch master ref to ensure SHA is available
+            self.bundle_repo_manager.fetch(bundle, bundle_config.source.master_selector)
+
+            wt = self.bundle_repo_manager.create_worktree(
+                bundle, master_sha, writable=False, prefix="cap-check"
+            )
+            try:
+                import importlib.util
+                caps_dir = wt / "capabilities"
+                if not caps_dir.is_dir():
+                    return False
+
+                for py_file in caps_dir.glob("*.py"):
+                    if py_file.name.startswith("_"):
+                        continue
+                    try:
+                        spec = importlib.util.spec_from_file_location(
+                            f"cap_check_{py_file.stem}",
+                            py_file,
+                        )
+                        if not spec or not spec.loader:
+                            continue
+                        import sys
+                        sys.path.insert(0, str(wt))
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+
+                        for obj_name in dir(module):
+                            obj = getattr(module, obj_name)
+                            if isinstance(obj, type) and hasattr(obj, "name") and hasattr(obj, "surface"):
+                                if getattr(obj, "name") == cap_name:
+                                    return getattr(obj, "surface") == "control_plane"
+                    except Exception:
+                        pass
+                return False
+            finally:
+                self.bundle_repo_manager.remove_worktree(wt)
+        except Exception as e:
+            logger.warning(f"Failed to check capability surface: {e}")
+            return False
+
+    def _cleanup_workspaces(self, job_id: str) -> None:
+        """Cleanup workspaces for a failed job launch.
+
+        Args:
+            job_id: Job identifier
+        """
+        temp_dirs = self._job_temp_dirs.pop(job_id, [])
+        for path in temp_dirs:
+            try:
+                self.bundle_repo_manager.remove_worktree(path)
+            except Exception:
+                try:
+                    import shutil
+                    shutil.rmtree(path, ignore_errors=True)
+                except Exception:
+                    pass
 
     async def _handle_trigger(self, event: Event, *, replay: bool = False) -> None:
         if event.id in self._launched_event_ids and not replay:
@@ -731,6 +893,71 @@ class Supervisor:
         temp_dirs = self._job_temp_dirs.pop(job_id, [])
         if temp_dirs:
             self.workspace_manager.cleanup(temp_dirs)
+
+        # ADR-0021: Control-plane finalize
+        cp_finalize_state = self.state.control_plane_finalize_state.pop(job_id, None)
+        if cp_finalize_state:
+            cp_proc = cp_finalize_state.subprocess_handle
+            cp_worktree = Path(cp_finalize_state.master_worktree)
+            try:
+                if cp_proc and cp_proc.returncode is None:
+                    # Subprocess still alive - execute finalize frames
+                    from yoitsu_contracts import HostPathView, ContainerPathView, ControlPlaneContext
+                    cp_context = ControlPlaneContext(
+                        job_id=job_id,
+                        task_id=task_id,
+                        bundle=cp_finalize_state.bundle,
+                        role=job_record.role,
+                        goal=job_record.goal,
+                        job_config={},
+                        host_paths=HostPathView(
+                            bundle_workspace="",  # Not needed for finalize
+                            target_workspace="",  # Not needed for finalize
+                            master_worktree=str(cp_worktree),
+                        ),
+                        container_paths=ContainerPathView(),
+                    )
+
+                    deadline = SharedDeadline(
+                        self.control_plane_executor.TOTAL_TIMEOUT_SECONDS
+                    )
+                    for cap_name in cp_finalize_state.capabilities:
+                        events, success = await self.control_plane_executor.send_frame(
+                            cp_proc, "finalize", cap_name, cp_context, deadline
+                        )
+                        for evt in events:
+                            await self.client.emit(evt.type, evt.data)
+                        # Process cleanup events
+                        for evt in events:
+                            if evt.type == "control_plane.cleanup_path":
+                                path = evt.data.get("path", "")
+                                if path:
+                                    try:
+                                        import shutil
+                                        shutil.rmtree(path, ignore_errors=True)
+                                    except Exception as e:
+                                        logger.warning(f"Cleanup failed: {e}")
+
+                    await self.control_plane_executor.stop_subprocess(cp_proc)
+                else:
+                    # Subprocess lost to restart - emit audit event
+                    await self.client.emit("control_plane.finalize_skipped", {
+                        "job_id": job_id,
+                        "reason": "subprocess lost to supervisor restart",
+                    })
+            except Exception as e:
+                logger.warning(f"Control-plane finalize error: {e}")
+                if cp_proc and cp_proc.returncode is None:
+                    try:
+                        await self.control_plane_executor.stop_subprocess(cp_proc)
+                    except Exception:
+                        pass
+            finally:
+                # Cleanup master worktree
+                try:
+                    self.bundle_repo_manager.remove_worktree(cp_worktree)
+                except Exception as e:
+                    logger.warning(f"Failed to remove control-plane worktree: {e}")
         
         _, cancelled = await self.scheduler.record_job_terminal(
             job_id=job_id,
@@ -1276,7 +1503,156 @@ class Supervisor:
                 code="target_workspace_prepare_failed",
             )
             return
-        
+
+        # ADR-0021: Control-plane capability execution
+        # Bootstrap check: reject if bundle has no BundleControlPlaneSwitched event
+        # Per ADR-0021 A.5: scope is per bundle, not per role
+        if bundle:
+            switched_sha = self.state.control_plane_shas.get(bundle)
+            if switched_sha is None:
+                await self._fail_job_before_launch(
+                    job_id=job_id,
+                    error=f"Bundle {bundle} has no BundleControlPlaneSwitched event",
+                    code="control_plane_not_bootstrapped",
+                )
+                self._cleanup_workspaces(job_id)
+                return
+
+        # Determine control-plane needs for this role
+        cp_needs: list[str] = []
+        cp_switched_sha: str | None = None
+        cp_worktree: Path | None = None
+        cp_proc: asyncio.subprocess.Process | None = None
+        extra_mounts: list[tuple[str, str, bool]] = []
+        extra_env: dict[str, str] = {}
+
+        if bundle and switched_sha:
+            # Get role metadata to find control-plane capabilities
+            role_meta = await self._get_role_metadata(bundle, role)
+            if role_meta:
+                # Filter needs for control-plane surface
+                for cap_name in role_meta.needs:
+                    if await self._capability_is_control_plane(bundle, cap_name, switched_sha):
+                        cp_needs.append(cap_name)
+
+            if cp_needs:
+                # Create worktree at master@switched_sha
+                bundle_config = self.config.bundles.get(bundle)
+                if bundle_config and bundle_config.source.url:
+                    self.bundle_repo_manager.ensure_bare_clone(bundle, bundle_config.source.url)
+                    cp_switched_sha = switched_sha
+                    cp_worktree = self.bundle_repo_manager.create_worktree(
+                        bundle, switched_sha, writable=False, prefix=f"cp-{job_id}"
+                    )
+
+                    try:
+                        # Start control-plane subprocess
+                        cp_proc = await self.control_plane_executor.start_subprocess(
+                            bundle, cp_worktree
+                        )
+
+                        # Forward stderr in background
+                        asyncio.create_task(
+                            self.control_plane_executor.forward_stderr(cp_proc, bundle)
+                        )
+
+                        # Build ControlPlaneContext
+                        from yoitsu_contracts import HostPathView, ContainerPathView, ControlPlaneContext
+                        cp_context = ControlPlaneContext(
+                            job_id=job_id,
+                            task_id=task_id or job_id,
+                            bundle=bundle,
+                            role=role,
+                            goal=goal,
+                            job_config={},  # Will be populated from spec later if needed
+                            host_paths=HostPathView(
+                                bundle_workspace=prepared.bundle_source.workspace if prepared.bundle_source else "",
+                                target_workspace=prepared.target_source.workspace if prepared.target_source else "",
+                                master_worktree=str(cp_worktree),
+                            ),
+                            container_paths=ContainerPathView(),
+                        )
+
+                        # Execute setup frames with shared deadline
+                        deadline = SharedDeadline(self.control_plane_executor.TOTAL_TIMEOUT_SECONDS)
+                        for cap_name in cp_needs:
+                            events, success = await self.control_plane_executor.send_frame(
+                                cp_proc, "setup", cap_name, cp_context, deadline
+                            )
+                            if not success:
+                                await self._fail_job_before_launch(
+                                    job_id=job_id,
+                                    error=f"Control-plane setup failed for {cap_name}",
+                                    code="control_plane_setup_failed",
+                                )
+                                await self.control_plane_executor.stop_subprocess(cp_proc)
+                                self.bundle_repo_manager.remove_worktree(cp_worktree)
+                                self._cleanup_workspaces(job_id)
+                                return
+
+                            # Process launch-modifying events
+                            for evt in events:
+                                if evt.type == "control_plane.volume_mount":
+                                    extra_mounts.append((
+                                        evt.data.get("host_path", ""),
+                                        evt.data.get("container_path", ""),
+                                        evt.data.get("rw", False),
+                                    ))
+                                elif evt.type == "control_plane.env_set":
+                                    extra_env[evt.data.get("key", "")] = evt.data.get("value", "")
+                                # Emit all events to event store
+                                await self.client.emit(evt.type, evt.data)
+
+                        # Emit ControlPlaneLaunchApplied marker
+                        await self.client.emit("control_plane.launch_applied", {
+                            "job_id": job_id,
+                            "bundle": bundle,
+                            "master_sha": switched_sha,
+                            "capabilities": cp_needs,
+                        })
+
+                        # Store finalize state
+                        self.state.control_plane_finalize_state[job_id] = ControlPlaneFinalizeState(
+                            bundle=bundle,
+                            master_sha=switched_sha,
+                            master_worktree=str(cp_worktree),
+                            capabilities=cp_needs,
+                            subprocess_handle=cp_proc,
+                        )
+
+                    except ControlPlaneTimeout as e:
+                        await self._fail_job_before_launch(
+                            job_id=job_id,
+                            error=f"Control-plane timeout: {e}",
+                            code="control_plane_timeout",
+                        )
+                        if cp_proc:
+                            await self.control_plane_executor.stop_subprocess(cp_proc)
+                        if cp_worktree:
+                            self.bundle_repo_manager.remove_worktree(cp_worktree)
+                        self._cleanup_workspaces(job_id)
+                        return
+                    except ControlPlaneFrameError as e:
+                        await self._fail_job_before_launch(
+                            job_id=job_id,
+                            error=f"Control-plane frame error: {e}",
+                            code="control_plane_frame_error",
+                        )
+                        if cp_proc:
+                            await self.control_plane_executor.stop_subprocess(cp_proc)
+                        if cp_worktree:
+                            self.bundle_repo_manager.remove_worktree(cp_worktree)
+                        self._cleanup_workspaces(job_id)
+                        return
+                    except Exception as e:
+                        logger.exception(f"Control-plane execution error: {e}")
+                        if cp_proc:
+                            await self.control_plane_executor.stop_subprocess(cp_proc)
+                        if cp_worktree:
+                            self.bundle_repo_manager.remove_worktree(cp_worktree)
+                        self._cleanup_workspaces(job_id)
+                        raise
+
         spec = self.runtime_builder.build(
             job_id=job_id,
             task_id=task_id or job_id,
@@ -1294,6 +1670,8 @@ class Supervisor:
             analyzer_version=analyzer_version,  # ADR-0017
             bundle_source=prepared.bundle_source,  # ADR-0015
             target_source=prepared.target_source,  # ADR-0015
+            extra_volume_mounts=extra_mounts,  # ADR-0021
+            extra_env=extra_env,  # ADR-0021
         )
 
         # Validate runtime environment before container creation

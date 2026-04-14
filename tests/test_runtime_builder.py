@@ -249,7 +249,7 @@ def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: py
     )
 
     builder = RuntimeSpecBuilder(config, defaults)
-    
+
     # ADR-0015: Test with bundle_source and target_source
     bundle_source = BundleSource(
         name="factorio",
@@ -264,6 +264,14 @@ def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: py
         workspace="/home/holo/yoitsu/target",
     )
 
+    # ADR-0021: Extra mounts come from control-plane capability (factorio_mount)
+    extra_volume_mounts = [
+        (mod_scripts_dir, mod_scripts_dir, True),  # Factorio mod scripts RW
+    ]
+    extra_env = {
+        "FACTORIO_MOD_SCRIPTS_DIR": mod_scripts_dir,
+    }
+
     spec = builder.build(
         job_id="factorio-worker-1",
         source_event_id="evt-factorio",
@@ -275,12 +283,14 @@ def test_runtime_spec_builder_mounts_factorio_mod_scripts_dir_rw(monkeypatch: py
         bundle_sha=None,
         bundle_source=bundle_source,
         target_source=target_source,
+        extra_volume_mounts=extra_volume_mounts,  # ADR-0021
+        extra_env=extra_env,  # ADR-0021
     )
 
     # ADR-0015: Bundle workspace mounted RO
     assert (bundle_source.workspace, "/opt/yoitsu/palimpsest/bundle", False) in spec.volume_mounts
     # ADR-0015: Target workspace mounted RW
     assert (target_source.workspace, "/opt/yoitsu/palimpsest/target", True) in spec.volume_mounts
-    # Factorio mod scripts dir still RW
+    # ADR-0021: Factorio mod scripts dir via extra_volume_mounts
     assert (mod_scripts_dir, mod_scripts_dir, True) in spec.volume_mounts
     assert spec.env["FACTORIO_MOD_SCRIPTS_DIR"] == mod_scripts_dir

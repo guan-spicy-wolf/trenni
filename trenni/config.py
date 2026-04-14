@@ -73,22 +73,33 @@ class BundleRuntimeConfig:
 class BundleSourceConfig:
     """Bundle source configuration in Trenni registry.
 
-    Declares where the bundle repo is and which branch/tag to track.
-    Trenni resolves selector to a specific commit SHA at job dispatch time.
+    Declares where the bundle repo is and which branches to track.
+
+    Per ADR-0021: bundles provide two refs with different trust semantics:
+    - evolve_selector: Free evolution branch for job-side execution
+    - master_selector: PR-gated branch for control-plane execution
 
     Attributes:
         url: Bundle repo URI (git+file://, git+ssh://, git+https://, or direct git remote)
-        selector: Branch or tag name to track (e.g., "evolve", "main", "v1.2.3")
+        selector: Legacy field — now defaults to evolve_selector if not specified
+        evolve_selector: Branch for job-side capabilities (default: "evolve")
+        master_selector: Branch for control-plane capabilities (default: "master")
     """
     url: str = ""
-    selector: str = "main"
+    selector: str = "main"  # Legacy: used as fallback for evolve_selector
+    evolve_selector: str = ""  # ADR-0021: defaults to selector if unset
+    master_selector: str = "master"  # ADR-0021: control-plane trust boundary
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "BundleSourceConfig":
         payload = data or {}
+        selector = payload.get("selector", "main")
+        evolve = payload.get("evolve_selector", "") or selector
         return cls(
             url=payload.get("url", ""),
-            selector=payload.get("selector", "main"),
+            selector=selector,
+            evolve_selector=evolve,
+            master_selector=payload.get("master_selector", "master"),
         )
 
 
